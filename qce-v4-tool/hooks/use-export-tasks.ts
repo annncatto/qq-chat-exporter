@@ -517,7 +517,7 @@ export function useExportTasks(_props?: UseExportTasksProps) {
     }
   }, [apiCall, syncTaskToast])
 
-  const createTask = useCallback(async (form: CreateTaskForm): Promise<boolean> => {
+  const createTask = useCallback(async (form: CreateTaskForm, onCreated?: (taskId: string) => void): Promise<boolean> => {
     if (!form.peerUid || !form.sessionName) {
       setError("请填写完整信息")
       return false
@@ -604,6 +604,7 @@ export function useExportTasks(_props?: UseExportTasksProps) {
           tasksRef.current = next
           return next
         })
+        onCreated?.(taskId)
         return true
       }
 

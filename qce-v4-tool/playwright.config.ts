@@ -38,6 +38,7 @@ export default defineConfig({
     ],
     use: {
         baseURL: FRONTEND_URL,
+        launchOptions: process.env.E2E_BROWSER_PATH ? { executablePath: process.env.E2E_BROWSER_PATH } : undefined,
         trace: 'on-first-retry',
         screenshot: 'only-on-failure',
         video: 'retain-on-failure'

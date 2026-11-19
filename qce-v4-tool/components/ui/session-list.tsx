@@ -138,6 +138,7 @@ export interface SessionListProps {
     preset: Pick<CreateTaskForm, "chatType" | "peerUid" | "sessionName"> &
       Partial<Pick<CreateTaskForm, "peerUin" | "historySource">>
   ) => void
+  onOrganize?: (preset: Partial<CreateTaskForm>) => void
   onExportGroupAvatars?: (groupCode: string, groupName: string) => void
   onOpenEssenceModal?: (groupCode: string, groupName: string) => void
   onOpenGroupFilesModal?: (groupCode: string, groupName: string) => void
@@ -162,6 +163,7 @@ function SessionListComponent({
   onOpenBatchExportDialog,
   onPreviewChat,
   onOpenTaskWizard,
+  onOrganize,
   onExportGroupAvatars,
   onOpenEssenceModal,
   onOpenGroupFilesModal,
@@ -371,6 +373,14 @@ function SessionListComponent({
             >
               预览
             </button>
+            {onOrganize && <button
+              type="button"
+              className="inline-flex min-h-11 items-center justify-center rounded-full px-3 text-sm font-medium text-foreground hover:bg-muted"
+              onClick={(event) => {
+                event.stopPropagation()
+                onOrganize({ chatType, peerUid: item.id, peerUin: isGroup ? item.id : String((item.raw as Friend).uin || ''), sessionName: item.name })
+              }}
+            >整理</button>}
             {isGroup && group ? (
               <div className="flex items-center bg-white dark:bg-neutral-900 border border-black/5 dark:border-white/10 shadow-[0_1px_2px_rgba(0,0,0,0.04)] rounded-full overflow-hidden hover:border-black/10 transition-all">
                 <button
@@ -477,7 +487,7 @@ function SessionListComponent({
         )}
       </div>
     )
-  }, [batchMode, selectedItems, avatarExportLoading, onToggleItem, onPreviewChat, onOpenTaskWizard, onExportGroupAvatars, onOpenEssenceModal, onOpenGroupFilesModal])
+  }, [batchMode, selectedItems, avatarExportLoading, onToggleItem, onPreviewChat, onOpenTaskWizard, onOrganize, onExportGroupAvatars, onOpenEssenceModal, onOpenGroupFilesModal])
 
   return (
     <div className="space-y-0">
