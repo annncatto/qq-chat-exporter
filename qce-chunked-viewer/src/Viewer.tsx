@@ -40,10 +40,13 @@ import { DateRangePicker } from '@/components/ui/date-range-picker';
 import { Loader } from '@/components/ui/loader';
 import { MediaPreview, downloadUrl, type MediaItem } from '@/components/ui/media-preview';
 import { createTextBloomProbe, createTokenBloomProbe } from './qce/bloom';
-import { ChunkStore, loadManifest, type QceManifest } from './qce/chunk-store';
-import { roleKey } from './qce/log-review';
+import { ChunkStore, loadManifest } from './qce/chunk-store';
+import { reviewKey, roleAlias, roleKey } from './qce/log-review';
+import { loadLogWorkspace, openStoredRecording, readRecording, readRecordingFolder, saveLogWorkspace, type LogRecording, type StoredRecording } from './qce/log-workspace';
 import { useLogReview } from './useLogReview';
 import { LogDraft } from './LogDraft';
+import { LogSources } from './LogSources';
+import { LogCompare } from './LogCompare';
 import {
   installMediaFallback,
   replaceMediaWithFallback,
@@ -288,7 +291,20 @@ export default function Viewer(): React.ReactElement {
   const playingSrcRef = useRef('');
   const review = useLogReview(storeRef, engineRef, filterSourceRef, viewportRef);
 
-  const [manifest, setManifest] = useState<QceManifest | null>(null);
+  const [recordings, setRecordings] = useState<LogRecording[]>([]);
+  const recordingsRef = useRef<LogRecording[]>([]);
+  const pendingWrites = useRef<Promise<unknown>>(Promise.resolve());
+  const [activeKey, setActiveKey] = useState('');
+  const [compareKey, setCompareKey] = useState('');
+  const [layout, setLayout] = useState<'single' | 'horizontal' | 'vertical'>('single');
+  const [importing, setImporting] = useState(false);
+  const [recordingStatus, setRecordingStatus] = useState('');
+  const panePositions = useRef(new Map<string, { index: number; offset: number }>());
+  const pendingRow = useRef<{ key: string; index: number } | null>(null);
+  const rootRecording = recordings[0];
+  const activeRecording = recordings.find(recording => recording.key === activeKey) ?? rootRecording;
+  const comparison = recordings.find(recording => recording.key === compareKey) ?? rootRecording;
+  const manifest = activeRecording?.store.manifest ?? null;
   const [filters, setFilters] = useState<Filters>(NO_FILTERS);
   const filtersRef = useRef<Filters>(NO_FILTERS);
   const [query, setQuery] = useState('');
@@ -369,7 +385,11 @@ export default function Viewer(): React.ReactElement {
 
   // Rich-media clicks inside the exported message HTML: voice playback,
   // video preview, and voice download. Delegated from the viewport container.
-  function onViewportClick(e: React.MouseEvent): void {
+  function onViewportClick(
+    e: React.MouseEvent,
+    select = review.selectRow,
+    jump = (id: string, from?: string) => { void jumpToMessageId(id, from); },
+  ): void {
     const target = e.target as HTMLElement;
 
     const forwardToggle = target.closest('.forward-card-toggle');
@@ -392,7 +412,7 @@ export default function Viewer(): React.ReactElement {
     if (reply instanceof HTMLElement && !target.closest('a, button')) {
       const msgId = reply.getAttribute('data-reply-to');
       const sourceId = reply.closest('.message[id]')?.id;
-      if (msgId) void jumpToMessageId(msgId, sourceId);
+      if (msgId) jump(msgId, sourceId);
       return;
     }
 
@@ -416,7 +436,7 @@ export default function Viewer(): React.ReactElement {
     }
     if (!target.closest('a,button,input,textarea,label,select,[role="button"],.image-content img,.sticker-wrap')) {
       const row = target.closest<HTMLElement>('.hs-item[data-i]');
-      if (row && !row.querySelector('.skel-row')) review.selectRow(Number(row.dataset.i));
+      if (row && !row.querySelector('.skel-row')) select(Number(row.dataset.i));
     }
   }
 
@@ -493,21 +513,25 @@ export default function Viewer(): React.ReactElement {
     }, 20_000);
   }
 
+  async function findMessageIndex(store: ChunkStore, msgId: string): Promise<number | null> {
+    const idx = store.manifest.msgidIndex;
+    if (!idx?.bucketCount) return null;
+    const bucket = fnv1a32(String(msgId), 0x811c9dc5) % idx.bucketCount;
+    const chunkId = await store.msgIdToChunkId(msgId, bucket);
+    if (!chunkId) return null;
+    const c = store.manifest.chunks.findIndex((m) => m.id === chunkId);
+    if (c < 0) return null;
+    const records = await store.load(c);
+    const k = records.findIndex((r) => r.id === msgId);
+    return k < 0 ? null : store.chunkStarts[c]! + k;
+  }
+
   async function jumpToMessageId(msgId: string, returnMsgId?: string): Promise<void> {
     const store = storeRef.current;
     const engine = engineRef.current;
     if (!store || !engine) return;
-    const idx = manifestRef.current?.msgidIndex;
-    if (!idx?.bucketCount) return;
-    const bucket = fnv1a32(String(msgId), 0x811c9dc5) % idx.bucketCount;
-    const chunkId = await store.msgIdToChunkId(msgId, bucket);
-    if (!chunkId) return;
-    const c = store.manifest.chunks.findIndex((m) => m.id === chunkId);
-    if (c < 0) return;
-    const records = await store.load(c);
-    const k = records.findIndex((r) => r.id === msgId);
-    if (k < 0) return;
-    const globalIdx = store.chunkStarts[c]! + k;
+    const globalIdx = await findMessageIndex(store, msgId);
+    if (globalIdx === null || engineRef.current !== engine) return;
     const filterSource = filterSourceRef.current;
     if (filterSource) {
       const p = filterSource.indexOf(globalIdx);
@@ -537,8 +561,6 @@ export default function Viewer(): React.ReactElement {
     requestAnimationFrame(highlight);
   }
 
-  const manifestRef = useRef<QceManifest | null>(null);
-
   function withHighlight(src: DataSource): DataSource {
     const highlight = (html: string): string =>
       highlightRef.current ? highlightHtml(html, highlightRef.current) : html;
@@ -555,44 +577,138 @@ export default function Viewer(): React.ReactElement {
 
   useEffect(() => {
     let disposed = false;
-    void loadManifest('.').then((m) => {
+    void loadManifest('.').then(async m => {
+      const key = reviewKey(m);
+      const store = new ChunkStore('.', m);
+      const saved = await loadLogWorkspace(key).catch(() => undefined);
       if (disposed) return;
-      manifestRef.current = m;
-      setManifest(m);
-      if (m.chat?.name) document.title = `跑团记录 - ${m.chat.name}`;
+      const primary = { key, store, label: saved?.primaryLabel || m.chat.name, included: saved?.primaryIncluded ?? true };
+      const restored = [primary, ...(saved?.additions.map(openStoredRecording) ?? [])];
+      recordingsRef.current = restored;
+      setRecordings(restored);
+      if (m.chat?.name) document.title = `聊天记录 - ${m.chat.name}`;
     });
     return () => {
       disposed = true;
     };
   }, []);
 
+  function updateRecordings(next: LogRecording[]): void {
+    const primary = next[0];
+    if (!primary) return;
+    recordingsRef.current = next;
+    setRecordings(next);
+    const additions = next.flatMap(recording => recording.saved ? [{
+      ...recording.saved, included: recording.included, label: recording.label,
+    }] : []);
+    pendingWrites.current = pendingWrites.current.then(() => saveLogWorkspace(primary.key, {
+      primaryIncluded: primary.included, primaryLabel: primary.label, additions,
+    })).catch(() => setRecordingStatus('浏览器未能保存导入记录。'));
+  }
+
+  function updateRecording(key: string, changes: Partial<Pick<LogRecording, 'label' | 'included'>>): void {
+    const previous = recordingsRef.current.find(recording => recording.key === key);
+    if (!previous || (changes.label ?? previous.label) === previous.label &&
+        (changes.included ?? previous.included) === previous.included) return;
+    updateRecordings(recordingsRef.current.map(recording => recording === previous ? { ...recording, ...changes } : recording));
+  }
+
+  async function importRecordings(files: File[], folder: boolean): Promise<void> {
+    if (!files.length || importing) return;
+    setImporting(true);
+    setRecordingStatus('正在读取记录…');
+    const staged: StoredRecording[] = [];
+    const errors: string[] = [];
+    if (folder) {
+      try { staged.push(await readRecordingFolder(files)); }
+      catch (error) { errors.push(error instanceof Error ? error.message : '读取文件夹失败。'); }
+    } else {
+      for (const file of files) {
+        try { staged.push(...await readRecording(file)); }
+        catch (error) { errors.push(`${file.name}：${error instanceof Error ? error.message : '读取失败。'}`); }
+      }
+    }
+    const keys = new Set(recordingsRef.current.map(recording => recording.key));
+    const imported = [];
+    for (const item of staged) {
+      if (keys.has(item.key)) continue;
+      keys.add(item.key);
+      imported.push(openStoredRecording(item));
+    }
+    if (imported.length) {
+      review.includeRoles(imported);
+      updateRecordings([...recordingsRef.current, ...imported]);
+    }
+    const duplicateCount = staged.length - imported.length;
+    setRecordingStatus([
+      imported.length ? `已导入 ${imported.length} 份记录。` : '',
+      duplicateCount ? `已跳过 ${duplicateCount} 份重复记录。` : '',
+      ...errors,
+    ].join(' '));
+    setImporting(false);
+  }
+
+  function openRecording(key: string, index?: number): void {
+    if (key === activeRecording?.key) {
+      if (index !== undefined) {
+        if (filterSourceRef.current) applyFilters(NO_FILTERS);
+        review.openRow(index);
+      }
+      return;
+    }
+    if (index !== undefined) pendingRow.current = { key, index };
+    setActiveKey(key);
+    setSidebarOpen(false);
+  }
+
   useEffect(() => {
-    if (!manifest) return;
+    if (!activeRecording || !rootRecording) return;
     const el = viewportRef.current;
     if (!el) return;
-    const store = new ChunkStore('.', manifest);
+    const { store, key, initial } = activeRecording;
+    const { manifest } = store;
     storeRef.current = store;
-    const reviewPosition = review.initialize(manifest);
+    const reviewPosition = review.initialize(manifest, rootRecording.key, initial);
+    filterRunRef.current++;
+    filterSourceRef.current = null;
+    filtersRef.current = NO_FILTERS;
+    setFilters(NO_FILTERS);
+    setFilterStatus('');
+    setQuery('');
+    setRoleSender('');
+    setDateStart('');
+    setDateEnd('');
+    resetSearch();
+    clearReplyReturn();
+    setLoadedChunks(store.loadedChunkCount());
     const engine = new HyperScroll(el, {
       dataSource: withHighlight(fullSourceOf(store)),
       keyboard: true,
     });
     engineRef.current = engine;
     let refreshQueued = false;
-    store.onChunkLoaded = () => {
+    let frame = 0;
+    const unsubscribe = store.subscribe(() => {
       setLoadedChunks(store.loadedChunkCount());
       if (refreshQueued) return;
       refreshQueued = true;
-      requestAnimationFrame(() => {
+      frame = requestAnimationFrame(() => {
         refreshQueued = false;
         engine.refresh();
       });
-    };
+    });
 
-    if (reviewPosition !== null && reviewPosition >= 0 && reviewPosition < manifest.stats.totalMessages) {
+    const restore = panePositions.current.get(key);
+    const choice = pendingRow.current;
+    if (choice?.key === key) {
+      pendingRow.current = null;
+      review.openRow(choice.index);
+    } else if (restore) {
+      engine.scrollToIndex(restore.index, restore.offset);
+    } else if (reviewPosition !== null && reviewPosition >= 0 && reviewPosition < manifest.stats.totalMessages) {
       engine.scrollToIndex(reviewPosition, -12);
     } else if (settingsRef.current.rememberScroll) {
-      const saved = Number(localStorage.getItem('qce-scroll') ?? -1);
+      const saved = Number(localStorage.getItem(key + ':scroll') ?? (key === rootRecording.key ? localStorage.getItem('qce-scroll') : null) ?? -1);
       if (saved > 0 && saved < manifest.stats.totalMessages) engine.scrollToIndex(saved);
     }
     let lastSavedAnchor: number | null = null;
@@ -602,7 +718,7 @@ export default function Viewer(): React.ReactElement {
       if (!s.rememberScroll && !s.prefetchChunks) return;
       const a = engine.getStats().anchor;
       if (s.rememberScroll && a.index !== lastSavedAnchor) {
-        localStorage.setItem('qce-scroll', String(a.index));
+        localStorage.setItem(key + ':scroll', String(a.index));
         lastSavedAnchor = a.index;
       }
       if (s.prefetchChunks) {
@@ -614,13 +730,16 @@ export default function Viewer(): React.ReactElement {
 
     return () => {
       window.clearInterval(settingsTimer);
+      cancelAnimationFrame(frame);
+      unsubscribe();
       if (searchRef.current) searchRef.current.cancelled = true;
+      if (!filterSourceRef.current) panePositions.current.set(key, engine.getStats().anchor);
       engine.destroy();
       engineRef.current = null;
       storeRef.current = null;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [manifest]);
+  }, [activeRecording?.store]);
 
   function fullSourceOf(store: ChunkStore): DataSource {
     return {
@@ -793,11 +912,22 @@ export default function Viewer(): React.ReactElement {
 
   const chat = manifest?.chat;
   const stats = manifest?.stats;
+  const label = activeRecording?.label || '聊天记录';
   const senderEntry = manifest?.senders.find((s) => s.uid === filters.sender);
-  const senderName = senderEntry?.displayName;
+  const senderName = manifest && senderEntry ? roleAlias(senderEntry, manifest, review.progress.roles) ?? senderEntry.displayName : undefined;
   const selectedRole = manifest?.senders.find(sender => sender.uid === roleSender);
   const selectedRoleKey = manifest && selectedRole ? roleKey(selectedRole, manifest) : '';
   const reviewedCount = Object.keys(review.progress.decisions).length;
+  const canDraft = recordings.some(recording => recording.included &&
+    Object.values(review.recordingProgress(recording.store.manifest, recording.initial).decisions).includes('keep'));
+  const draftTitle = recordings.filter(recording => recording.included).length > 1 ? (rootRecording?.label ?? label) + ' - 合并成稿' : label;
+  const draftOpen = Boolean(review.draft);
+  useEffect(() => {
+    if (!draftOpen) return;
+    if (!canDraft) { review.setDraft(null); return; }
+    return review.refreshDraft(recordings, draftTitle);
+  }, [draftOpen, canDraft, recordings, draftTitle, review.progress.decisions, review.progress.edits,
+    review.progress.chapters, review.progress.roles, review.draftRevision]);
   const chapters = useMemo(() => {
     const counts = new Map<string, number>();
     for (const chapter of Object.values(review.progress.chapters)) {
@@ -816,10 +946,10 @@ export default function Viewer(): React.ReactElement {
         } ${sidebarCollapsed ? 'md:hidden' : ''}`}
       >
         <div>
-          <div className="font-semibold text-base tracking-tight">{chat?.name ?? '加载中…'}</div>
+          <div className="font-semibold text-base tracking-tight">{activeRecording?.label ?? '加载中…'}</div>
           {chat ? (
             <div className="mt-0.5 text-muted-foreground text-xs">
-              {chat.type === 'group' ? '群聊' : '私聊'}记录
+              {chat.type === 'group' ? '群聊记录' : chat.type === 'local' ? '导入记录' : '私聊记录'}
             </div>
           ) : null}
         </div>
@@ -939,7 +1069,7 @@ export default function Viewer(): React.ReactElement {
                     <SelectItem key={sd.uid} value={sd.uid}>
                       <span className="flex items-center gap-2">
                         <SenderDot name={sd.displayName} avatar={sd.avatar ?? undefined} />
-                        <span className="max-w-40 truncate">{sd.displayName}</span>
+                        <span className="max-w-40 truncate">{roleAlias(sd, manifest, review.progress.roles) ?? sd.displayName}</span>
                       </span>
                     </SelectItem>
                   ))}
@@ -993,6 +1123,12 @@ export default function Viewer(): React.ReactElement {
             </div>
           </>
         ) : null}
+
+        {activeRecording && <LogSources recordings={recordings} active={activeRecording} busy={importing}
+          status={recordingStatus} onOpen={openRecording}
+          onRename={(key, name) => { if (name.trim()) updateRecording(key, { label: name.trim() }); }}
+          onInclude={(key, included) => updateRecording(key, { included })}
+          onImport={(files, folder) => void importRecordings(files, folder)} />}
 
         {manifest && manifest.senders.length > 0 && <details className="qce-log-roles mt-5 text-xs">
           <summary className="cursor-pointer font-medium">角色管理</summary>
@@ -1094,12 +1230,22 @@ export default function Viewer(): React.ReactElement {
             if (window.matchMedia('(min-width: 768px)').matches) setSidebarCollapsed(value => !value);
             else setSidebarOpen(value => !value);
           }}><PanelLeftIcon /></Button>
-          <span className={`qce-log-title${sidebarCollapsed ? '' : ' md:hidden'}`}>{chat?.name || '聊天记录'}</span>
+          <span className={`qce-log-title${sidebarCollapsed ? '' : ' md:hidden'}`}>{label}</span>
           {manifest && <span className="qce-log-count" aria-live="polite">已审 {reviewedCount.toLocaleString()} / {manifest.stats.totalMessages.toLocaleString()}</span>}
-          <Button variant="outline" size="sm" disabled={review.busy || !reviewedCount} onClick={() => review.draft ? review.setDraft(null) : void review.showDraft()}>成稿</Button>
+          <select className="qce-log-layout rounded border px-1.5 py-1 text-xs" aria-label="分屏布局" value={layout}
+            onChange={event => {
+              if (layout === 'single' && activeRecording) setCompareKey(recordings.find(item => item.key !== activeRecording.key)?.key ?? activeRecording.key);
+              setLayout(event.currentTarget.value as typeof layout);
+            }}>
+            <option value="single">单窗</option>
+            <option value="horizontal">左右分屏</option>
+            <option value="vertical">上下分屏</option>
+          </select>
+          <Button variant="outline" size="sm" disabled={review.busy || (!review.draft && !canDraft)} onClick={() => review.draft ? review.setDraft(null) : void review.showDraft(recordings, draftTitle)}>成稿</Button>
         </header>
 
-        <div className="relative min-h-0 flex-1">
+        <div className={`qce-log-panes qce-log-panes-${layout}`}>
+        <div className="relative min-h-0 min-w-0">
           <div className="pointer-events-none absolute inset-x-0 top-0 z-10 h-6 bg-gradient-to-b from-background to-transparent" />
           <div
             id="viewport"
@@ -1128,6 +1274,11 @@ export default function Viewer(): React.ReactElement {
               <span>回到消息</span>
             </button>
           ) : null}
+        </div>
+        {layout !== 'single' && comparison && <LogCompare recordings={recordings} recording={comparison}
+          progress={review.recordingProgress(comparison.store.manifest, comparison.initial)}
+          onChoose={setCompareKey} onOpen={index => openRecording(comparison.key, index)} onClick={onViewportClick}
+          findMessage={id => findMessageIndex(comparison.store, id)} />}
         </div>
         {review.edit && <form className="qce-log-edit" onSubmit={event => {
           event.preventDefault();
@@ -1167,7 +1318,10 @@ export default function Viewer(): React.ReactElement {
           </div>
         </footer>}
         {review.status && <p className="qce-log-status" role="status">{review.status}</p>}
-        {review.draft && <LogDraft draft={review.draft} onEdit={review.editDraft} onExport={format => void review.showDraft(format)} onClose={() => review.setDraft(null)} />}
+        {review.draft && <LogDraft draft={review.draft} onEdit={(entry, text) => {
+          const recording = recordings.find(item => item.key === entry.key);
+          if (recording) review.editDraft(recording, entry, text);
+        }} onExport={format => void review.showDraft(recordings, draftTitle, format)} onClose={() => review.setDraft(null)} />}
       </div>
 
       <MediaPreview item={preview} onClose={() => setPreview(null)} />

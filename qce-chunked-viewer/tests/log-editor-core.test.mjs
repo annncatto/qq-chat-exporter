@@ -293,6 +293,8 @@ test("a draft cannot silently apply to a different current message", () => {
 test("retained Log text uses a bracketed role and an actual newline", () => {
   const p = parse([row(0, "10001", "u_1", "KP", "第一行\n第二行")]);
   C.decide(p, 0, "keep");
+  p.state.rounds[0] = "第一回合";
+  assert.match(C.output(p, "md"), /\*\*第一回合\*\*\n\n/);
   assert.match(C.output(p), /【KP】\n第一行\n第二行/);
   assert.doesNotMatch(C.output(p), /\/\//);
   assert.match(

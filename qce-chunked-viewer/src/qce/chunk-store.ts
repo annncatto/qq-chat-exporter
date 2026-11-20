@@ -78,7 +78,7 @@ interface QceChunkPayload {
  * (via a bootstrap script that runs before the data scripts), so the store
  * can resolve everything synchronously without script injection.
  */
-interface QceInlineData {
+export interface QceInlineData {
   manifest?: QceManifest;
   chunks: Record<string, QceRecord[]>;
   msgid: Record<number, Array<[string, string]>>;
@@ -130,8 +130,7 @@ export function loadManifest(baseUrl: string): Promise<QceManifest> {
 export class ChunkStore {
   readonly manifest: QceManifest;
   readonly chunkStarts: number[];
-  /** Called after any lazy chunk arrives, so the viewer can re-render. */
-  onChunkLoaded: (() => void) | null = null;
+  private readonly chunkListeners = new Set<() => void>();
   /** Chunks that have been loaded at least once (survives LRU eviction). */
   private readonly everLoaded = new Set<number>();
 
@@ -145,7 +144,7 @@ export class ChunkStore {
   private readonly pendingBuckets = new Map<number, Promise<Map<string, string>>>();
   private readonly bucketResolvers = new Map<number, (pairs: Array<[string, string]>) => void>();
 
-  constructor(baseUrl: string, manifest: QceManifest) {
+  constructor(baseUrl: string, manifest: QceManifest, private readonly inline = window.__QCE_INLINE__) {
     this.baseUrl = baseUrl;
     this.manifest = manifest;
     this.chunkStarts = [];
@@ -154,12 +153,23 @@ export class ChunkStore {
       this.chunkStarts.push(acc);
       acc += c.count;
     }
-    window.__QCE_CHUNK__ = (c) => {
-      this.resolvers.get(c.id)?.(c);
-    };
-    window.__QCE_MSGID_INDEX__ = (bucket, pairs) => {
-      this.bucketResolvers.get(bucket)?.(pairs);
-    };
+    if (!inline) {
+      window.__QCE_CHUNK__ = (c) => {
+        this.resolvers.get(c.id)?.(c);
+      };
+      window.__QCE_MSGID_INDEX__ = (bucket, pairs) => {
+        this.bucketResolvers.get(bucket)?.(pairs);
+      };
+    }
+  }
+
+  subscribe(listener: () => void): () => void {
+    this.chunkListeners.add(listener);
+    return () => { this.chunkListeners.delete(listener); };
+  }
+
+  private notify(): void {
+    for (const listener of this.chunkListeners) listener();
   }
 
   chunkOf(index: number): number {
@@ -192,7 +202,7 @@ export class ChunkStore {
   private insertInline(chunk: number): QceRecord[] | null {
     const meta = this.manifest.chunks[chunk];
     if (!meta) return null;
-    const messages = window.__QCE_INLINE__?.chunks[meta.id];
+    const messages = this.inline?.chunks[meta.id];
     if (!messages) return null;
     for (const r of messages) {
       if (!r.kind) r.kind = kindOf(r.html);
@@ -202,7 +212,7 @@ export class ChunkStore {
     this.everLoaded.add(chunk);
     this.trimLru();
     // Defer: get() runs during render; notify listeners outside of it.
-    if (isNew) queueMicrotask(() => this.onChunkLoaded?.());
+    if (isNew) queueMicrotask(() => this.notify());
     return messages;
   }
 
@@ -257,6 +267,7 @@ export class ChunkStore {
     if (cached) return Promise.resolve(cached);
     const inline = this.insertInline(chunk);
     if (inline) return Promise.resolve(inline);
+    if (this.inline) return Promise.reject(new Error('导入记录缺少消息分块。'));
     const inflight = this.pending.get(chunk);
     if (inflight) return inflight;
     const meta = this.manifest.chunks[chunk]!;
@@ -303,13 +314,13 @@ export class ChunkStore {
       }
       if (!messages) {
         // Re-render so visible skeletons re-request the chunk.
-        this.onChunkLoaded?.();
+        this.notify();
         throw new Error(`failed to load chunk ${meta.id}`);
       }
       this.cache.set(chunk, messages);
       this.everLoaded.add(chunk);
       this.trimLru();
-      this.onChunkLoaded?.();
+      this.notify();
       return messages;
     })().finally(() => this.pending.delete(chunk));
     this.pending.set(chunk, p);
@@ -323,7 +334,7 @@ export class ChunkStore {
   msgIdToChunkId(msgId: string, bucket: number): Promise<string | null> {
     const loaded = this.msgIdBuckets.get(bucket);
     if (loaded) return Promise.resolve(loaded.get(msgId) ?? null);
-    const inlinePairs = window.__QCE_INLINE__?.msgid[bucket];
+    const inlinePairs = this.inline?.msgid[bucket];
     if (inlinePairs) {
       const map = new Map(inlinePairs);
       this.msgIdBuckets.set(bucket, map);

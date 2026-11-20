@@ -2,22 +2,14 @@ import { useEffect, useRef, useState } from 'react';
 import type { PointerEvent, RefObject } from 'react';
 import type { FilteredDataSource, HyperScroll } from './hyperscroll';
 import type { ChunkStore, QceManifest, QceRecord } from './qce/chunk-store';
+import type { LogRecording } from './qce/log-workspace';
 import {
-  emptyReview, escapeReviewText, loadReviewRecord, makeReviewProject, outputDraft,
-  progressBackup, readProgressBackup, restoreReview, reviewBody, reviewKey, roleKey, saveReviewFile,
-  type Decision, type DraftFormat, type ReviewDraft, type ReviewProgress,
+  emptyReview, loadReviewRecord, makeReviewProject, outputDraft, renderLogRow,
+  progressBackup, readProgressBackup, restoreReview, reviewBody, reviewKey, saveReviewFile,
+  type Decision, type DraftEntry, type DraftFormat, type ReviewDraft, type ReviewProgress,
 } from './qce/log-review';
 
 type DragState = { id: number; index: number; x: number; y: number; started: boolean; end?: number };
-
-const keptMark = '<span class="qce-log-kept" role="img" aria-label="已保留" title="已保留">✓</span>';
-
-function markKeptMessage(html: string): string {
-  const avatar = /(<div class="message (?:self|other)"[^>]*>\s*)(<div class="avatar">[\s\S]*?<\/div>)/;
-  const marked = html.replace(avatar, `$1<div class="qce-log-avatar">$2${keptMark}</div>`);
-  if (marked !== html) return marked;
-  return html.replace(/(<div class="system-message-container[^"]*"[^>]*>)/, `$1${keptMark}`);
-}
 
 export function useLogReview(store: RefObject<ChunkStore | null>, engine: RefObject<HyperScroll | null>, filter: RefObject<FilteredDataSource | null>, viewport: RefObject<HTMLDivElement | null>) {
   const [progress, setProgress] = useState(emptyReview);
@@ -25,25 +17,67 @@ export function useLogReview(store: RefObject<ChunkStore | null>, engine: RefObj
   const [chapter, setChapter] = useState('');
   const [autoChapter, setAutoChapter] = useState(false);
   const [rangeMode, setRangeMode] = useState(false);
-  const [edit, setEdit] = useState<{ index: number; text: string } | null>(null);
+  const [edit, setEditState] = useState<{ index: number; text: string } | null>(null);
   const [draft, setDraft] = useState<ReviewDraft | null>(null);
+  const [draftRevision, setDraftRevision] = useState(0);
   const [status, setStatus] = useState('');
   const [busy, setBusy] = useState(false);
   const state = useRef(progress);
   const selection = useRef(selected);
   const storageKey = useRef('');
+  const roleStorageKey = useRef('');
+  const perSource = useRef(new Map<string, ReviewProgress>());
+  const unfinishedEdits = useRef(new Map<string, NonNullable<typeof edit>>());
+  const aliases = useRef<ReviewProgress['roles'] | undefined>(undefined);
   const undoStack = useRef<ReviewProgress[]>([]);
   const dragging = useRef<DragState | null>(null);
   const suppressClick = useRef(false);
 
   useEffect(() => { engine.current?.refresh(); }, [engine, progress, selected]);
 
-  function initialize(manifest: QceManifest): number | null {
+  function recordingProgress(manifest: QceManifest, initial?: ReviewProgress): ReviewProgress {
+    const key = reviewKey(manifest);
+    let saved = perSource.current.get(key);
+    if (!saved) {
+      saved = restoreReview(key, manifest.stats.totalMessages, initial);
+      perSource.current.set(key, saved);
+    }
+    return { ...saved, roles: aliases.current ?? saved.roles };
+  }
+
+  function initialize(manifest: QceManifest, workspaceKey: string, initial?: ReviewProgress): number | null {
     storageKey.current = reviewKey(manifest);
-    const restored = restoreReview(storageKey.current, manifest.stats.totalMessages);
+    if (aliases.current === undefined) {
+      roleStorageKey.current = workspaceKey + ':roles';
+      try {
+        const saved = localStorage.getItem(roleStorageKey.current);
+        if (saved) aliases.current = JSON.parse(saved);
+      } catch { /* Use the names from this recording. */ }
+    }
+    const restored = recordingProgress(manifest, initial);
+    aliases.current = restored.roles;
     state.current = restored;
     setProgress(restored);
+    undoStack.current = [];
+    clearSelection();
+    setEditState(unfinishedEdits.current.get(storageKey.current) ?? null);
+    setStatus('');
     return restored.cursor;
+  }
+
+  function setEdit(next: typeof edit): void {
+    if (next) unfinishedEdits.current.set(storageKey.current, next);
+    else unfinishedEdits.current.delete(storageKey.current);
+    setEditState(next);
+  }
+
+  function persist(key: string, next: ReviewProgress): void {
+    perSource.current.set(key, next);
+    try {
+      localStorage.setItem(key, JSON.stringify(next));
+    } catch {
+      setStatus('浏览器无法自动保存。关闭前请备份进度。');
+    }
   }
 
   function commit(next: ReviewProgress, remember = true): void {
@@ -51,13 +85,22 @@ export function useLogReview(store: RefObject<ChunkStore | null>, engine: RefObj
       undoStack.current.push(state.current);
       if (undoStack.current.length > 30) undoStack.current.shift();
     }
+    if (aliases.current !== next.roles) {
+      aliases.current = next.roles;
+      try {
+        localStorage.setItem(roleStorageKey.current, JSON.stringify(next.roles));
+      } catch {
+        setStatus('浏览器无法自动保存角色名称。');
+      }
+    }
     state.current = next;
     setProgress(next);
-    try {
-      localStorage.setItem(storageKey.current, JSON.stringify(next));
-    } catch {
-      setStatus('浏览器无法自动保存。关闭前请备份进度。');
-    }
+    persist(storageKey.current, next);
+  }
+
+  function includeRoles(recordings: LogRecording[]): void {
+    const imported = Object.assign({}, ...recordings.map(recording => recording.initial?.roles ?? {}));
+    if (Object.keys(imported).length > 0) commit({ ...state.current, roles: { ...imported, ...state.current.roles } }, false);
   }
 
   function sourceIndex(position: number): number | null {
@@ -88,6 +131,32 @@ export function useLogReview(store: RefObject<ChunkStore | null>, engine: RefObj
       if (position >= 0) engine.current?.scrollToIndex(position, -12);
     }
     viewport.current?.focus({ preventScroll: true });
+  }
+
+  function revealNext(index: number): void {
+    viewport.current?.focus({ preventScroll: true });
+    requestAnimationFrame(() => {
+      const view = viewport.current;
+      const scroller = engine.current;
+      if (!view || !scroller || state.current.cursor !== index) return;
+      const visible = visiblePosition(index);
+      if (visible < 0) return;
+      const row = view.querySelector(`.hs-item[data-i="${index}"]`);
+      const bounds = view.getBoundingClientRect();
+      if (!row) {
+        scroller.scrollToIndex(visible, -Math.round(bounds.height * .65));
+        return;
+      }
+      const box = row.getBoundingClientRect();
+      const margin = 12;
+      if (box.height >= bounds.height - 2 * margin) {
+        if (box.top >= bounds.bottom || box.bottom <= bounds.top) scroller.scrollBy(box.top - bounds.top - margin);
+      } else if (box.bottom > bounds.bottom) {
+        scroller.scrollBy(box.bottom - bounds.bottom + margin);
+      } else if (box.top < bounds.top) {
+        scroller.scrollBy(box.top - bounds.top - margin);
+      }
+    });
   }
 
   function selectRow(index: number): void {
@@ -126,15 +195,18 @@ export function useLogReview(store: RefObject<ChunkStore | null>, engine: RefObj
       edits: editResult ? { ...previous.edits, [index]: editResult.text } : previous.edits,
       chapters: autoChapter ? { ...previous.chapters, [index]: label } : previous.chapters,
     });
-    reveal(next ?? index);
+    if (next !== null) revealNext(next);
+    else viewport.current?.focus({ preventScroll: true });
   }
 
   async function beginEdit(): Promise<void> {
     const index = currentIndex();
-    if (index === null || busy || !store.current) return;
+    const source = store.current;
+    if (index === null || busy || !source) return;
     setBusy(true);
     try {
-      const row = await loadReviewRecord(store.current, index);
+      const row = await loadReviewRecord(source, index);
+      if (store.current !== source) return;
       setEdit({ index, text: state.current.edits[index] ?? reviewBody(row) });
       selectRow(index);
     } catch (error) {
@@ -236,6 +308,11 @@ export function useLogReview(store: RefObject<ChunkStore | null>, engine: RefObj
     reveal(index);
   }
 
+  function openRow(index: number): void {
+    commit({ ...state.current, cursor: index }, false);
+    reveal(index);
+  }
+
   function renameRole(key: string, name: string): void {
     if ((state.current.roles[key] || '') === name.trim()) return;
     const roles = { ...state.current.roles };
@@ -245,17 +322,7 @@ export function useLogReview(store: RefObject<ChunkStore | null>, engine: RefObj
   }
 
   function decorate(index: number, row: QceRecord, html: string): string {
-    const current = state.current;
-    const flags = (current.cursor === index ? ' qce-log-current' : '') + (selection.current.has(index) ? ' qce-log-selected' : '');
-    const decision = current.decisions[index];
-    const chapter = current.chapters[index];
-    const edit = current.edits[index];
-    const role = store.current && current.roles[roleKey(row, store.current.manifest)];
-    const labels = [role, chapter, decision === 'exclude' ? '已排除' : ''].filter((s): s is string => !!s);
-    const meta = labels.length ? `<div class="qce-log-message-meta">${labels.map(escapeReviewText).join(' · ')}</div>` : '';
-    const updated = edit === undefined ? '' : `<div class="qce-log-edited">${escapeReviewText(edit)}</div>`;
-    const message = decision === 'keep' ? markKeptMessage(html) : html;
-    return `<div class="hs-item${flags}" data-i="${index}">${message}${meta}${updated}</div>`;
+    return renderLogRow(index, row, html, state.current, store.current!.manifest, selection.current.has(index));
   }
 
   function saveProgress(): void {
@@ -264,11 +331,12 @@ export function useLogReview(store: RefObject<ChunkStore | null>, engine: RefObj
   }
 
   async function openProgress(file: File): Promise<void> {
-    const manifest = store.current?.manifest;
-    if (!manifest || busy) return;
+    const source = store.current;
+    if (!source || busy) return;
     setBusy(true);
     try {
-      const next = readProgressBackup(await file.text(), manifest);
+      const next = readProgressBackup(await file.text(), source.manifest);
+      if (store.current !== source) return;
       setEdit(null);
       setDraft(null);
       clearSelection();
@@ -282,15 +350,30 @@ export function useLogReview(store: RefObject<ChunkStore | null>, engine: RefObj
     }
   }
 
-  async function showDraft(format?: DraftFormat): Promise<void> {
+  function buildDraft(recordings: LogRecording[], title: string): Promise<ReviewDraft> {
+    return makeReviewProject(title, recordings.filter(recording => recording.included).map(recording => ({
+      key: recording.key, store: recording.store, progress: recordingProgress(recording.store.manifest, recording.initial),
+    })));
+  }
+
+  function refreshDraft(recordings: LogRecording[], title: string): () => void {
+    let cancelled = false;
+    void buildDraft(recordings, title).then(next => {
+      if (!cancelled) setDraft(previous => previous ? next : null);
+    }).catch(error => {
+      if (!cancelled) setStatus(error instanceof Error ? error.message : '无法更新成稿。');
+    });
+    return () => { cancelled = true; };
+  }
+
+  async function showDraft(recordings: LogRecording[], title: string, format?: DraftFormat): Promise<void> {
     if (busy || !store.current) return;
     setBusy(true);
     setStatus(format ? '正在生成文件…' : '正在生成成稿…');
     try {
-      const source = store.current;
-      const result = await makeReviewProject(source, state.current);
+      const result = await buildDraft(recordings, title);
       if (format) {
-        saveReviewFile(source.manifest.chat.name, format, outputDraft(result.project, format));
+        saveReviewFile(title, format, outputDraft(result.project, format));
       } else setDraft(result);
       setStatus('');
     } catch (error) {
@@ -300,14 +383,23 @@ export function useLogReview(store: RefObject<ChunkStore | null>, engine: RefObj
     }
   }
 
-  function editDraft(index: number, text: string): void {
-    commit({ ...state.current, edits: { ...state.current.edits, [index]: text } });
+  function editDraft(recording: LogRecording, entry: DraftEntry, text: string): void {
+    const manifest = recording.store.manifest;
+    const key = reviewKey(manifest);
+    const before = recordingProgress(manifest, recording.initial);
+    const next = { ...before, edits: { ...before.edits, [entry.index]: text } };
+    if (key === storageKey.current) commit(next);
+    else {
+      persist(key, next);
+      setDraftRevision(previous => previous + 1);
+    }
   }
 
   return {
     progress, selected, initialize, chapter, setChapter, autoChapter, setAutoChapter, rangeMode, setRangeMode,
-    edit, setEdit, cancelEdit, draft, setDraft, status, busy, selectRow, clearSelection, decide, beginEdit,
-    undo, canUndo: undoStack.current.length > 0, pointerDown, pointerMove, pointerEnd, assign, jumpChapter, renameRole,
+    edit, setEdit, cancelEdit, draft, setDraft, draftRevision, refreshDraft, status, busy, selectRow, clearSelection, decide, beginEdit,
+    undo, canUndo: undoStack.current.length > 0, pointerDown, pointerMove, pointerEnd, assign, jumpChapter, openRow, renameRole,
+    recordingProgress, includeRoles,
     decorate, saveProgress, openProgress, showDraft, editDraft,
   };
 }

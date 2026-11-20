@@ -12,9 +12,11 @@ export interface ReviewProgress {
   cursor: number | null;
 }
 
-interface PortableProject {
+export interface PortableProject {
+  title: string;
+  windows: Array<{ id: string; name: string; enabled: boolean; selfUin?: string; selfUid?: string }>;
   people: Array<{ id: string; qq: string; uid: string; name: string; role: string }>;
-  messages: Array<{ personId: string; text: string }>;
+  messages: Array<{ personId: string; text: string; time: string; timestamp: number; sourceId: string; windowId: string; original?: { system?: boolean } }>;
   state: {
     decisions: Array<Decision | 'pending'>;
     edits: Partial<Record<number, string>>;
@@ -26,7 +28,7 @@ interface PortableProject {
 
 const core = (globalThis as typeof globalThis & {
   LogEditorCore: {
-    parse(text: string): PortableProject;
+    parse(text: string, filename?: string): PortableProject;
     output(project: PortableProject, format: DraftFormat): string;
     escapeHTML(text: string): string;
   };
@@ -34,7 +36,10 @@ const core = (globalThis as typeof globalThis & {
 
 export const escapeReviewText = core.escapeHTML;
 export const outputDraft = core.output;
-export type ReviewDraft = { project: PortableProject; indices: number[] };
+export const parseLogProject = core.parse;
+export interface DraftEntry { key: string; index: number }
+export interface DraftInput { key: string; store: ChunkStore; progress: ReviewProgress }
+export type ReviewDraft = { project: PortableProject; entries: DraftEntry[] };
 
 export function emptyReview(): ReviewProgress {
   return { decisions: {}, edits: {}, chapters: {}, roles: {}, cursor: null };
@@ -62,12 +67,12 @@ function decodeProgress(value: ReviewProgress | null, total: number): ReviewProg
   };
 }
 
-export function restoreReview(key: string, total: number): ReviewProgress {
+export function restoreReview(key: string, total: number, initial = emptyReview()): ReviewProgress {
   try {
     const saved = localStorage.getItem(key);
-    return saved ? decodeProgress(JSON.parse(saved), total) : emptyReview();
+    return saved ? decodeProgress(JSON.parse(saved), total) : initial;
   } catch {
-    return emptyReview();
+    return initial;
   }
 }
 
@@ -105,6 +110,36 @@ export function roleKey(record: Pick<QceRecord, 'uin' | 'uid'>, manifest: QceMan
   return knownQq ? `qq:${knownQq}` : record.uid ? `uid:${record.uid}` : '';
 }
 
+export function roleAlias(record: Pick<QceRecord, 'uin' | 'uid'>, manifest: QceManifest, aliases: ReviewProgress['roles']): string | undefined {
+  return aliases[roleKey(record, manifest)] || aliases[`uid:${record.uid}`];
+}
+
+const keptMark = '<span class="qce-log-kept" role="img" aria-label="已保留" title="已保留">✓</span>';
+
+function markKeptMessage(html: string): string {
+  const avatar = /(<div class="message (?:self|other)"[^>]*>\s*)(<div class="avatar">[\s\S]*?<\/div>)/;
+  const marked = html.replace(avatar, `$1<div class="qce-log-avatar">$2${keptMark}</div>`);
+  if (marked !== html) return marked;
+  return html.replace(/(<div class="system-message-container[^"]*"[^>]*>)/, `$1${keptMark}`);
+}
+
+export function renderLogRow(index: number, row: QceRecord, html: string, progress: ReviewProgress, manifest: QceManifest, selected = false): string {
+  const flags = (progress.cursor === index ? ' qce-log-current' : '') + (selected ? ' qce-log-selected' : '');
+  const decision = progress.decisions[index];
+  const chapter = progress.chapters[index];
+  const edit = progress.edits[index];
+  const role = roleAlias(row, manifest, progress.roles);
+  const labels = [chapter, decision === 'exclude' ? '已排除' : ''].filter((s): s is string => !!s);
+  const meta = labels.length ? `<div class="qce-log-message-meta">${labels.map(escapeReviewText).join(' · ')}</div>` : '';
+  const updated = edit === undefined ? '' : `<div class="qce-log-edited">${escapeReviewText(edit)}</div>`;
+  let message = role
+    ? html.replace(/(<div class="message-header">\s*(?:<span class="sender-title">[^<]*<\/span>\s*)?)<span class="sender">[^<]*<\/span>/,
+      (_, header: string) => `${header}<span class="sender" title="${escapeReviewText(row.name)}">${escapeReviewText(role)}</span>`)
+    : html;
+  if (decision === 'keep') message = markKeptMessage(message);
+  return `<div class="hs-item${flags}" data-i="${index}">${message}${meta}${updated}</div>`;
+}
+
 export function reviewBody(record: QceRecord): string {
   if (record.logText) return record.logText;
   const fragment = document.createElement('template');
@@ -127,44 +162,47 @@ export async function loadReviewRecord(store: ChunkStore, index: number): Promis
   return row;
 }
 
-export async function makeReviewProject(store: ChunkStore, progress: ReviewProgress): Promise<ReviewDraft> {
-  const indices = Object.keys(progress.decisions).map(Number).filter(index => progress.decisions[index] === 'keep').sort((a, b) => a - b);
-  if (!indices.length) throw new Error('请先保留要写入成稿的消息。');
-  if (indices.length > 200000) throw new Error('成稿最多可包含 20 万条消息。');
-  const messages = [];
-  const roles = new Map<string, string>();
+export async function makeReviewProject(title: string, inputs: DraftInput[]): Promise<ReviewDraft> {
+  const selected = inputs.flatMap(input => Object.keys(input.progress.decisions).map(Number)
+    .filter(index => input.progress.decisions[index] === 'keep').sort((a, b) => a - b)
+    .map(index => ({ input, index })));
+  if (!selected.length) throw new Error('请先保留要写入成稿的消息。');
+  if (selected.length > 200000) throw new Error('成稿最多可包含 20 万条消息。');
+  const rows = [];
+  let loadedStore: ChunkStore | undefined;
   let loadedChunk = -1;
   let loadedRows: QceRecord[] = [];
-  for (const index of indices) {
+  for (const { input, index } of selected) {
+    const { store } = input;
     const chunk = store.chunkOf(index);
-    if (loadedChunk !== chunk) {
+    if (store !== loadedStore || loadedChunk !== chunk) {
       loadedRows = await store.load(chunk);
+      loadedStore = store;
       loadedChunk = chunk;
     }
     const row = loadedRows[index - store.chunkStarts[chunk]!];
     if (!row) throw new Error(`无法读取第 ${index + 1} 条消息。`);
-    const key = roleKey(row, store.manifest);
-    const qq = key.startsWith('qq:') ? key.slice(3) : undefined;
-    const alias = progress.roles[key];
-    if (alias) roles.set(key, alias);
-    messages.push({
+    const role = roleKey(row, store.manifest);
+    rows.push({ input, index, message: {
       id: row.id, time: row.ts > 0 ? new Date(row.ts).toLocaleString('zh-CN', { hour12: false }) : row.date,
-      timestamp: row.ts, sender: { uid: row.uid, uin: qq, name: row.name || '系统' },
+      timestamp: row.ts, sender: { uid: row.uid, uin: role.startsWith('qq:') ? role.slice(3) : undefined, name: row.name || '系统' },
       content: { text: reviewBody(row) },
-    });
+    } });
   }
-  const project = core.parse(JSON.stringify({ chatInfo: store.manifest.chat, messages }));
+  if (rows.every(({ message }) => message.timestamp > 0)) rows.sort((a, b) => a.message.timestamp - b.message.timestamp);
+  const project = core.parse(JSON.stringify({ chatInfo: { name: title }, messages: rows.map(row => row.message) }));
+  const roles = inputs[0]!.progress.roles;
   for (const person of project.people) {
     const key = person.qq ? `qq:${person.qq}` : `uid:${person.uid}`;
-    person.role = roles.get(key) || person.role;
+    person.role = roles[key] || roles[`uid:${person.uid}`] || person.role;
   }
-  indices.forEach((index, offset) => {
-    project.state.decisions[offset] = progress.decisions[index] || 'pending';
+  rows.forEach(({ input: { progress }, index }, offset) => {
+    project.state.decisions[offset] = 'keep';
     if (progress.edits[index] !== undefined) project.state.edits[offset] = progress.edits[index];
     if (progress.chapters[index]) project.state.rounds[offset] = progress.chapters[index];
   });
   project.state.sections = [...new Set(Object.values(project.state.rounds).filter((s): s is string => !!s))];
-  return { project, indices };
+  return { project, entries: rows.map(({ input, index }) => ({ key: input.key, index })) };
 }
 
 export function saveReviewFile(title: string, extension: string, text: string): void {

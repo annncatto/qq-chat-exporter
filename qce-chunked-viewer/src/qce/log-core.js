@@ -681,7 +681,12 @@
       return (
         '<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>' +
         escapeHTML(project.title) +
-        "</title><style>body{font:16px/1.8 system-ui,sans-serif;max-width:1000px;margin:40px auto;padding:0 20px;color:#242a30}main{display:grid;grid-template-columns:180px minmax(0,1fr);gap:30px}nav a{display:block;margin-left:18px;color:inherit}article{margin-bottom:24px;scroll-margin-top:20px}header{font-weight:600}p{white-space:pre-wrap;overflow-wrap:anywhere;margin:5px 0}@media(max-width:600px){main{display:block}nav{margin-bottom:30px}}</style><h1>" +
+        "</title><style>" +
+        "body{font:16px/1.8 system-ui,sans-serif;max-width:1000px;margin:40px auto;padding:0 20px;color:#242a30}" +
+        "main{display:grid;grid-template-columns:180px minmax(0,1fr);gap:30px}nav a{display:block;margin-left:18px;color:inherit}" +
+        "section>h2{margin:1em 0 .4em;font-size:1em;font-weight:700;text-align:center;overflow-wrap:anywhere}" +
+        "article{margin-bottom:24px;scroll-margin-top:20px}header{font-weight:600}p{white-space:pre-wrap;overflow-wrap:anywhere;margin:5px 0}" +
+        "@media(max-width:600px){main{display:block}nav{margin-bottom:30px}}</style><h1>" +
         escapeHTML(project.title) +
         "</h1><main><nav>" +
         nav +
@@ -699,11 +704,11 @@
       const round = project.state.rounds[message.id] || "";
       if (round !== previous && (round || previous))
         lines.push(
-          (format === "md" ? "## " : "【") +
+          (format === "md" ? "**" : "【") +
             (format === "md"
               ? escapeMD(round || "未归类")
               : round || "未归类") +
-            (format === "md" ? "" : "】"),
+            (format === "md" ? "**" : "】"),
           "",
         );
       previous = round;
