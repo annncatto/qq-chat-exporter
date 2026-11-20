@@ -4,7 +4,7 @@
 
 它不仅可以导出 HTML、JSON、TXT 和 Excel 等各种你需要的格式，还可以将聊天中发过的图片、视频和表情文件一并下载到本地保存。最最最重要的是，所有读取和解析都在你自己的电脑上完成，项目没有服务器或数据传输，绝对不会把你的聊天记录上传到任何地方。
 
-**[使用文档][docs-link]** **[下载][releases-link]** **[Docker 部署][docker-doc]** **[反馈问题][issues-link]**
+**[下载跑团版][log-releases-link]** **[使用文档][docs-link]** **[Docker 部署][docker-doc]** **[反馈问题][issues-link]**
 
 [![][github-release-shield]][releases-link]
 [![][github-downloads-shield]][releases-link]
@@ -27,23 +27,25 @@
 
 ## 快速开始
 
+从 [跑团版 Releases][log-releases-link] 下载适合当前系统的安装包或 Shell 包。打开 QCE 后，从侧栏进入[跑团工作台](#跑团工作台)。
+
 ### Windows 一键安装（推荐）
 
-1. 从 [Releases][releases-link] 下载一键安装包并运行
+1. 下载 `QQChatExporter-Installer-*-log.*.exe` 并运行
 2. 用 QQ 扫码登录
-3. 打开 `http://localhost:40653/qce`，开始导出
+3. 打开 `http://localhost:40653/qce`，进入「跑团工作台」
 
 ### Shell 模式（Windows / Linux / macOS Apple Silicon 预览）
 
-1. 从 [Releases][releases-link] 下载对应平台的压缩包
+1. 下载并解压适合自己平台的跑团版 Shell 包。Windows x64 使用 `.zip`，Linux x64 和 macOS Apple Silicon 使用各自的 `.tar.gz`
 2. 运行 `launcher-user.bat`（Windows）或 `./launcher-user.sh`（Linux / macOS）
-3. 用 QQ 扫码登录，控制台会打印一键登录链接，打开即可
+3. 用 QQ 扫码登录，打开控制台打印的一键登录链接，再进入「跑团工作台」
 4. 也可手动访问 `http://localhost:40653/qce`，令牌见控制台输出；在「设置 → 启动」里可开启登录后自动打开浏览器
 
 > \[!NOTE]
 > macOS 当前仅提供 Apple Silicon（arm64）预览包，且启动前需要完全退出电脑上的 QQ，详见 [macOS 使用指南][macos-doc]。
 
-### Docker 一键部署
+### QCE 上游的 Docker 部署
 
 适用于 macOS（含 Apple Silicon）、Linux、Windows，无需安装 QQ 客户端：
 
@@ -59,17 +61,18 @@ docker logs -f napcat-qce
 > \[!NOTE]
 > Apple Silicon (M1/M2/M3/M4) 通过 Rosetta 模拟运行，首次启动可能稍慢。详见 [Docker 部署指南][docker-doc]。
 
-## 文档
+## 跑团工作台
 
-[![文档](docs/images/docs-banner.png)][docs-link]
+从 QCE 的概览或侧栏打开「跑团工作台」。
 
-## 跑团 log 整理
+- **从 QQ 导入**。QQ 已连接时，点「从 QQ 导入」，选择会话和时间范围。导出完成后，记录会自动进入工作台。也可以从「会话」或已完成的 JSON 导出任务点「整理」。
+- **导入本地记录**。点「导入记录」，可以多选 JSON、JSONL 或 TXT。点「文件 → 打开工程」继续已有的 `.qcelog`。导入和整理本地记录无需登录 QQ。
 
-在“会话”中点击“整理”，选择时间范围后即可导出并进入连续审阅。已完成的 JSON 任务也可以直接点击“整理”。使用 `A` 保留、`S` 排除、`E` 编辑；编辑后按 `Ctrl+Enter` 确认并继续。
+整理时按 `A` 保留、`S` 排除、`E` 编辑。编辑后按 `Ctrl+Enter` 确认并继续。回头修改已确认的消息时，确认后跳至当前阅读窗的下一条。
 
 整理区沿用 QCE 的聊天气泡样式，支持连续滚动、查找和消息序号跳转。窗口／角色侧栏、章节／回合表可收起；“心流”隐藏周边界面，并可左右或上下分屏独立浏览。
 
-可将多个窗口导入同一份 log，在窗口管理中改名或切换是否纳入成稿。角色按 QQ 号或 UID 统一绑定，修改角色名后作用于所有窗口。填写章节／回合名称并勾选“当前整理”，之后确认或排除的消息会自动归入该项；不勾选则可保持无章节。也可在“编辑 Log”中拖选连续消息后一次归类。
+可将多个窗口导入同一份 log，在窗口管理中改名或切换是否纳入成稿。角色按 QQ 号或 UID 统一绑定，修改角色名后作用于所有窗口。填写章节／回合名称并勾选「当前整理」，之后确认或排除的消息会自动归入该项。也可在审阅窗或「编辑 Log」中拖选连续消息后一次归类。触屏上先点「选择范围」再拖选。
 
 勾选“预览”可打开可移动的成稿浮窗；点击预览进入“编辑 Log”，直接修改正文，并按角色、章节筛选。文本采用“【角色】”换行接正文的格式。
 
@@ -77,7 +80,11 @@ docker logs -f napcat-qce
 
 本地文本导入支持带日期、昵称和 QQ 号的 QQ / TIM 记录。附件保留原始元数据并以文字标记显示，工程文件不包含附件二进制内容。
 
-构建前端后，可在 `qce-v4-tool` 中运行 `pnpm build:log-editor`，生成可直接用浏览器打开的 `out/log-editor-standalone.html`。
+也可以在 `qce-v4-tool` 中运行 `pnpm build:log-editor`，生成可直接在浏览器打开的 `out/log-editor-standalone.html`，用于只处理本地记录时使用。
+
+## 文档
+
+[![文档](docs/images/docs-banner.png)][docs-link]
 
 ## 相关项目
 
@@ -103,6 +110,7 @@ docker logs -f napcat-qce
 
 [image-banner]: docs/images/banner.png
 [docs-link]: https://shuakami.github.io/qq-chat-exporter/
+[log-releases-link]: https://github.com/annncatto/qq-chat-exporter/releases
 [releases-link]: https://github.com/shuakami/qq-chat-exporter/releases
 [issues-link]: https://github.com/shuakami/qq-chat-exporter/issues
 [stars-link]: https://github.com/shuakami/qq-chat-exporter/stargazers

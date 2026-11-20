@@ -2,6 +2,7 @@
 """QCE Plugin Complete Package Builder - Cross Platform"""
 
 import os
+import hashlib
 import sys
 import json
 import shutil
@@ -155,7 +156,13 @@ def main():
     
     # Get NapCat version
     napcat_version = get_napcat_latest_version("[1/11]")
-    napcat_url = f"https://github.com/NapNeko/NapCatQQ/releases/download/{napcat_version}/NapCat.Shell.zip"
+    napcat_archive_url = os.environ.get("NAPCAT_SHELL_URL")
+    napcat_sha256 = os.environ.get("NAPCAT_SHELL_SHA256")
+    if napcat_archive_url and not napcat_sha256:
+        raise SystemExit("NAPCAT_SHELL_URL requires NAPCAT_SHELL_SHA256")
+    napcat_url = napcat_archive_url or (
+        f"https://github.com/NapNeko/NapCatQQ/releases/download/{napcat_version}/NapCat.Shell.zip"
+    )
     print()
     
     # Clean old files
@@ -173,6 +180,10 @@ def main():
     print(f"[3/11] Downloading NapCat.Shell {napcat_version}...")
     try:
         download_file(napcat_url, "NapCat.Shell.zip")
+        if napcat_sha256:
+            digest = hashlib.sha256(Path("NapCat.Shell.zip").read_bytes()).hexdigest()
+            if digest != napcat_sha256.lower():
+                raise ValueError(f"NapCat Shell SHA-256 mismatch: {digest}")
     except Exception as e:
         print(f"[!] Download failed: {e}")
         sys.exit(1)

@@ -9,20 +9,34 @@ on:
       - 'v*.*.*-rc.*'
   workflow_dispatch:
 
-permissions: write-all
+permissions:
+  contents: read
 
 jobs:
   get-napcat-version:
     runs-on: ubuntu-latest
     outputs:
-      version: ${{ steps.get_version.outputs.version }}
+      version: ${{ steps.log_source.outputs.version || steps.get_version.outputs.version }}
+      shell_url: ${{ steps.log_source.outputs.shell_url }}
+      shell_sha256: ${{ steps.log_source.outputs.shell_sha256 }}
     steps:
+      - name: "固定跑团版的 NapCat Shell 来源"
+        id: log_source
+        if: github.repository == 'annncatto/qq-chat-exporter' && contains(github.ref_name, '-log.')
+        run: |
+          # NapCat 上游已撤下发行包。归档包须与原发布记录的 SHA-256 一致。
+          {
+            echo 'version=v4.18.42'
+            echo 'shell_url=https://github.com/XingYunStar/NapCatQQ/releases/download/v4.18.42/NapCat.Shell.zip'
+            echo 'shell_sha256=02e5ff0f79916c1e04c81c1b4590056406fb4293f1f1300c955e71fd08b2829d'
+          } >> "$GITHUB_OUTPUT"
       # 整条发布流程唯一一次 NapCat 版本查询，结果分发给下面所有打包任务。
       # 之前每个打包任务各查一次（5 次匿名请求），而匿名配额 60 次/小时、按来源
       # IP 计算，Actions 构建机共用出口 IP —— v6.1.9 发布时 macOS 那台被限流，
       # 静默回退到写死的 v4.8.119，产出了一个能构建、能过校验却无法登录的包。
       - name: "获取 NapCat 最新版本"
         id: get_version
+        if: steps.log_source.outcome != 'success'
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -56,7 +70,7 @@ jobs:
       - name: "Setup pnpm"
         uses: pnpm/action-setup@v4
         with:
-          version: 8
+          version: 9
 
       - name: "Setup Node.js"
         uses: actions/setup-node@v4
@@ -67,7 +81,7 @@ jobs:
 
       - name: "Build frontend"
         run: |
-          pnpm install --no-frozen-lockfile
+          pnpm install --frozen-lockfile
           QCE_VERSION="${GITHUB_REF_NAME#v}" pnpm run build
         working-directory: qce-v4-tool
 
@@ -222,6 +236,8 @@ jobs:
           QCE_VERSION: ${{ github.ref_name }}
           # 用上面解析好的版本号，三个平台因此必然打包同一个 NapCat。
           NAPCAT_VERSION: ${{ needs.get-napcat-version.outputs.version }}
+          NAPCAT_SHELL_URL: ${{ needs.get-napcat-version.outputs.shell_url }}
+          NAPCAT_SHELL_SHA256: ${{ needs.get-napcat-version.outputs.shell_sha256 }}
           QCE_FRONTEND_OUT: qce-v4-tool/out
           QCE_SERVER_BINARY: prebuilt-server/${{ matrix.server_binary }}
       
@@ -278,6 +294,7 @@ jobs:
           retention-days: 7
 
   build-framework-package:
+    if: github.repository == 'shuakami/qq-chat-exporter'
     needs: [get-napcat-version, build-frontend, build-server-binaries]
     runs-on: ubuntu-latest
     
@@ -321,6 +338,7 @@ jobs:
           retention-days: 7
 
   build-napcat-plugin:
+    if: github.repository == 'shuakami/qq-chat-exporter'
     needs: [build-frontend, build-server-binaries]
     runs-on: ubuntu-latest
 
@@ -505,6 +523,7 @@ jobs:
           retention-days: 7
 
   build-docker-image:
+    if: github.repository == 'shuakami/qq-chat-exporter'
     runs-on: ubuntu-latest
     needs: [get-napcat-version]
     # The Docker image is a secondary artifact: a build/push failure here must
@@ -532,8 +551,12 @@ jobs:
             ghcr.io/shuakami/napcat-qce:${{ github.ref_name }}
 
   create-release:
+    if: github.repository == 'shuakami/qq-chat-exporter'
     needs: [get-napcat-version, build-shell-packages, build-framework-package, build-napcat-plugin, build-installer-package]
     runs-on: ubuntu-latest
+    permissions:
+      actions: write
+      contents: write
     
     steps:
       - name: "检出仓库"
@@ -800,7 +823,7 @@ jobs:
           mv RELEASE_NOTES.tmp RELEASE_NOTES.md
 
       - name: "创建 GitHub Release"
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@v2
         with:
           name: ${{ github.ref_name }}
           body_path: RELEASE_NOTES.md
@@ -842,3 +865,89 @@ jobs:
           echo "========================================="
           echo "版本 ${{ github.ref_name }} 发布成功！"
           echo "========================================="
+
+  publish-log-release:
+    if: github.repository == 'annncatto/qq-chat-exporter' && github.ref_type == 'tag' && contains(github.ref_name, '-log.')
+    needs: [build-shell-packages, build-installer-package]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: "下载三种 Shell 包"
+        uses: actions/download-artifact@v4
+        with:
+          pattern: NapCat-QCE-*
+          path: release-files
+          merge-multiple: true
+      - name: "下载 Windows 一键安装包"
+        uses: actions/download-artifact@v4
+        with:
+          name: qce-installer-windows
+          path: release-files
+      - name: "校验各平台工作台及启动入口"
+        run: |
+          python3 - <<'PY'
+          import os
+          import tarfile
+          import zipfile
+          from pathlib import Path
+
+          files = Path("release-files")
+          version = os.environ["GITHUB_REF_NAME"]
+          archive_root = "NapCat-QCE-Windows-x64"
+          workspace = "static/qce/log-editor/workspace.html"
+          page = "static/qce/log-editor/index.html"
+          windows_package = files / f"{archive_root}-{version}.zip"
+          installer = files / f"QQChatExporter-Installer-{version}.exe"
+
+          with installer.open("rb") as executable:
+              if executable.read(2) != b"MZ":
+                  raise ValueError("Invalid Windows installer executable")
+          with zipfile.ZipFile(windows_package) as shell, zipfile.ZipFile(installer) as embedded:
+              embedded.getinfo(f"{archive_root}/Uninstall QQ Chat Exporter.exe")
+              for name in ("launcher-user.bat", "qce-server.exe", page, workspace):
+                  path = f"{archive_root}/{name}"
+                  if shell.read(path) != embedded.read(path):
+                      raise ValueError(f"Installer and Shell package differ: {name}")
+              editor = shell.read(f"{archive_root}/{workspace}")
+              if b'id="rr-file"' not in editor:
+                  raise ValueError("Windows package is missing the editor")
+
+          for platform in ("Linux-x64", "macOS-arm64"):
+              root = f"NapCat-QCE-{platform}"
+              with tarfile.open(files / f"{root}-{version}.tar.gz", "r:gz") as shell:
+                  for name in ("launcher-user.sh", "qce-server"):
+                      if not shell.getmember(f"{root}/{name}").mode & 0o111:
+                          raise ValueError(f"{platform}: {name} is not executable")
+                  shell.getmember(f"{root}/{page}")
+                  with shell.extractfile(f"{root}/{workspace}") as packaged_editor:
+                      if packaged_editor.read() != editor:
+                          raise ValueError(f"{platform}: packaged editor differs")
+          PY
+      - name: "发布跑团工作台预览版"
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version="$GITHUB_REF_NAME"
+          cat > RELEASE_NOTES.md <<'MD'
+          ## 下载与启动
+
+          | 版本 | 下载文件 | 启动方式 |
+          | --- | --- | --- |
+          | Windows x64 一键安装 | `QQChatExporter-Installer-*.exe` | 双击安装并打开 QCE |
+          | Windows x64 Shell | `NapCat-QCE-Windows-x64-*.zip` | 解压后双击 `launcher-user.bat` |
+          | Linux x64 Shell | `NapCat-QCE-Linux-x64-*.tar.gz` | 解压后运行 `./launcher-user.sh` |
+          | macOS Apple Silicon Shell（预览） | `NapCat-QCE-macOS-arm64-*.tar.gz` | 完全退出桌面 QQ，解压后运行 `./launcher-user.sh` |
+
+          需要导出新记录时，用 QQ 扫码登录并打开 QCE。进入「跑团工作台」，选择「从 QQ 导入」或导入已有记录。
+
+          审阅时可拖选连续消息，批量归入章节或回合。重新编辑已确认的消息后，会跳到当前阅读窗的下一条。
+
+          此预览版内置经过 SHA-256 校验的 NapCat v4.18.42 归档包。构建验证覆盖打包和启动入口。真实 QQ 登录尚未完成跨平台联调。
+          MD
+          gh release create "$version" --repo "$GITHUB_REPOSITORY" --verify-tag \
+            --title "QCE 跑团工作台 $version" --prerelease --notes-file RELEASE_NOTES.md \
+            "release-files/QQChatExporter-Installer-$version.exe" \
+            "release-files/NapCat-QCE-Windows-x64-$version.zip" \
+            "release-files/NapCat-QCE-Linux-x64-$version.tar.gz" \
+            "release-files/NapCat-QCE-macOS-arm64-$version.tar.gz"
