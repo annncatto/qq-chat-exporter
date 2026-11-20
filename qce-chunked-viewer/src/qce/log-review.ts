@@ -8,6 +8,7 @@ export interface ReviewProgress {
   decisions: Partial<Record<number, Decision>>;
   edits: Partial<Record<number, string>>;
   chapters: Partial<Record<number, string>>;
+  exchanges?: Partial<Record<number, number>>;
   roles: Partial<Record<string, string>>;
   cursor: number | null;
 }
@@ -37,9 +38,21 @@ const core = (globalThis as typeof globalThis & {
 export const escapeReviewText = core.escapeHTML;
 export const outputDraft = core.output;
 export const parseLogProject = core.parse;
-export interface DraftEntry { key: string; index: number }
-export interface DraftInput { key: string; store: ChunkStore; progress: ReviewProgress }
+export interface DraftEntry { key: string; index: number; source: string; exchange?: number }
+export interface DraftInput { key: string; label: string; store: ChunkStore; progress: ReviewProgress }
 export type ReviewDraft = { project: PortableProject; entries: DraftEntry[] };
+
+interface DraftRow {
+  input: DraftInput;
+  index: number;
+  message: {
+    id: string;
+    time: string;
+    timestamp: number;
+    sender: { uid: string; uin?: string; name: string };
+    content: { text: string };
+  };
+}
 
 export function emptyReview(): ReviewProgress {
   return { decisions: {}, edits: {}, chapters: {}, roles: {}, cursor: null };
@@ -62,6 +75,8 @@ function decodeProgress(value: ReviewProgress | null, total: number): ReviewProg
     decisions: Object.fromEntries(indexed(value.decisions).filter(([, decision]) => decision === 'keep' || decision === 'exclude')),
     edits: Object.fromEntries(indexed(value.edits).filter(([, text]) => typeof text === 'string')),
     chapters: Object.fromEntries(indexed(value.chapters).filter(([, chapter]) => typeof chapter === 'string')),
+    exchanges: Object.fromEntries(indexed(value.exchanges).filter(([, group]) =>
+      typeof group === 'number' && Number.isSafeInteger(group) && group >= 0)),
     roles: Object.fromEntries(entries(value.roles).filter(([name, alias]) => /^(qq|uid):/.test(name) && typeof alias === 'string')),
     cursor: validIndex(value.cursor) ? value.cursor : null,
   };
@@ -168,7 +183,7 @@ export async function makeReviewProject(title: string, inputs: DraftInput[]): Pr
     .map(index => ({ input, index })));
   if (!selected.length) throw new Error('请先保留要写入成稿的消息。');
   if (selected.length > 200000) throw new Error('成稿最多可包含 20 万条消息。');
-  const rows = [];
+  const rows: DraftRow[] = [];
   let loadedStore: ChunkStore | undefined;
   let loadedChunk = -1;
   let loadedRows: QceRecord[] = [];
@@ -190,19 +205,44 @@ export async function makeReviewProject(title: string, inputs: DraftInput[]): Pr
     } });
   }
   if (rows.every(({ message }) => message.timestamp > 0)) rows.sort((a, b) => a.message.timestamp - b.message.timestamp);
-  const project = core.parse(JSON.stringify({ chatInfo: { name: title }, messages: rows.map(row => row.message) }));
+  const exchangeKey = ({ input, index }: DraftRow) => {
+    const group = input.progress.exchanges?.[index];
+    return group === undefined ? undefined : `${input.key}:${group}`;
+  };
+  const exchanges = new Map<string, DraftRow[]>();
+  for (const row of rows) {
+    const key = exchangeKey(row);
+    if (key === undefined) continue;
+    const exchange = exchanges.get(key);
+    if (exchange) exchange.push(row);
+    else exchanges.set(key, [row]);
+  }
+  const emitted = new Set<string>();
+  const ordered = exchanges.size === 0 ? rows : rows.flatMap(row => {
+    const key = exchangeKey(row);
+    if (key === undefined) return [row];
+    if (emitted.has(key)) return [];
+    emitted.add(key);
+    return exchanges.get(key)!.sort((a, b) => a.index - b.index);
+  });
+  const project = core.parse(JSON.stringify({ chatInfo: { name: title }, messages: ordered.map(row => row.message) }));
   const roles = inputs[0]!.progress.roles;
   for (const person of project.people) {
     const key = person.qq ? `qq:${person.qq}` : `uid:${person.uid}`;
     person.role = roles[key] || roles[`uid:${person.uid}`] || person.role;
   }
-  rows.forEach(({ input: { progress }, index }, offset) => {
+  ordered.forEach(({ input: { progress }, index }, offset) => {
     project.state.decisions[offset] = 'keep';
     if (progress.edits[index] !== undefined) project.state.edits[offset] = progress.edits[index];
     if (progress.chapters[index]) project.state.rounds[offset] = progress.chapters[index];
   });
   project.state.sections = [...new Set(Object.values(project.state.rounds).filter((s): s is string => !!s))];
-  return { project, entries: rows.map(({ input, index }) => ({ key: input.key, index })) };
+  return { project, entries: ordered.map(row => ({
+    key: row.input.key,
+    index: row.index,
+    source: row.input.label,
+    exchange: (exchanges.get(exchangeKey(row) ?? '')?.length ?? 0) > 1 ? row.input.progress.exchanges?.[row.index] : undefined,
+  })) };
 }
 
 export function saveReviewFile(title: string, extension: string, text: string): void {

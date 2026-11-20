@@ -927,7 +927,7 @@ export default function Viewer(): React.ReactElement {
     if (!canDraft) { review.setDraft(null); return; }
     return review.refreshDraft(recordings, draftTitle);
   }, [draftOpen, canDraft, recordings, draftTitle, review.progress.decisions, review.progress.edits,
-    review.progress.chapters, review.progress.roles, review.draftRevision]);
+    review.progress.chapters, review.progress.roles, review.progress.exchanges, review.draftRevision]);
   const chapters = useMemo(() => {
     const counts = new Map<string, number>();
     for (const chapter of Object.values(review.progress.chapters)) {
@@ -1321,6 +1321,12 @@ export default function Viewer(): React.ReactElement {
         {review.draft && <LogDraft draft={review.draft} onEdit={(entry, text) => {
           const recording = recordings.find(item => item.key === entry.key);
           if (recording) review.editDraft(recording, entry, text);
+        }} onLink={entries => {
+          const recording = recordings.find(item => item.key === entries[0]?.key);
+          if (recording) review.linkDraftEntries(recording, entries);
+        }} onUnlink={entry => {
+          const recording = recordings.find(item => item.key === entry.key);
+          if (recording && entry.exchange !== undefined) review.unlinkDraftExchange(recording, entry.exchange);
         }} onExport={format => void review.showDraft(recordings, draftTitle, format)} onClose={() => review.setDraft(null)} />}
       </div>
 

@@ -194,6 +194,12 @@ mark.hl {
 .qce-log-draft-round { margin: .5rem 0 .25rem; font-size: 1em; font-weight: 700; text-align: center; overflow-wrap: anywhere; }
 .qce-log-draft-text article { border-bottom: 1px solid var(--border); padding: .4rem 0; }
 .qce-log-manuscript-line { display: block; width: 100%; text-align: left; white-space: pre-wrap; overflow-wrap: anywhere; }
+.qce-log-manuscript-line[aria-pressed="true"] { background: var(--accent); }
+.qce-log-manuscript-line:disabled { color: var(--muted-foreground); cursor: default; }
+.qce-log-draft-text .qce-log-draft-exchange { border-inline-start: 2px solid var(--ring); padding-inline-start: .5rem; }
+.qce-log-exchange-header { display: flex; justify-content: space-between; align-items: center; gap: .5rem; }
+.qce-log-exchange-header, .qce-log-draft-source { color: var(--muted-foreground); font-size: .6875rem; }
+.qce-log-exchange-header button { text-decoration: underline; }
 .qce-log-draft-bar select { max-width: 8rem; }
 
 @media (pointer: coarse) {

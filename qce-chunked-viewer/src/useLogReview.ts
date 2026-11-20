@@ -352,7 +352,8 @@ export function useLogReview(store: RefObject<ChunkStore | null>, engine: RefObj
 
   function buildDraft(recordings: LogRecording[], title: string): Promise<ReviewDraft> {
     return makeReviewProject(title, recordings.filter(recording => recording.included).map(recording => ({
-      key: recording.key, store: recording.store, progress: recordingProgress(recording.store.manifest, recording.initial),
+      key: recording.key, label: recording.label, store: recording.store,
+      progress: recordingProgress(recording.store.manifest, recording.initial),
     })));
   }
 
@@ -383,11 +384,12 @@ export function useLogReview(store: RefObject<ChunkStore | null>, engine: RefObj
     }
   }
 
-  function editDraft(recording: LogRecording, entry: DraftEntry, text: string): void {
+  function updateDraftProgress(recording: LogRecording, update: (before: ReviewProgress) => ReviewProgress): void {
     const manifest = recording.store.manifest;
     const key = reviewKey(manifest);
     const before = recordingProgress(manifest, recording.initial);
-    const next = { ...before, edits: { ...before.edits, [entry.index]: text } };
+    const next = update(before);
+    if (next === before) return;
     if (key === storageKey.current) commit(next);
     else {
       persist(key, next);
@@ -395,11 +397,34 @@ export function useLogReview(store: RefObject<ChunkStore | null>, engine: RefObj
     }
   }
 
+  function editDraft(recording: LogRecording, entry: DraftEntry, text: string): void {
+    updateDraftProgress(recording, before => ({ ...before, edits: { ...before.edits, [entry.index]: text } }));
+  }
+
+  function linkDraftEntries(recording: LogRecording, entries: DraftEntry[]): void {
+    updateDraftProgress(recording, before => {
+      const members = new Set(entries.filter(entry => entry.key === recording.key && before.decisions[entry.index] === 'keep')
+        .map(entry => entry.index));
+      if (members.size < 2) return before;
+      const exchanges = { ...before.exchanges };
+      const group = Object.values(exchanges).reduce<number>((max, value) => Math.max(max, value ?? 0), 0) + 1;
+      for (const index of members) exchanges[index] = group;
+      return { ...before, exchanges };
+    });
+  }
+
+  function unlinkDraftExchange(recording: LogRecording, group: number): void {
+    updateDraftProgress(recording, before => ({
+      ...before,
+      exchanges: Object.fromEntries(Object.entries(before.exchanges ?? {}).filter(([, value]) => value !== group)),
+    }));
+  }
+
   return {
     progress, selected, initialize, chapter, setChapter, autoChapter, setAutoChapter, rangeMode, setRangeMode,
     edit, setEdit, cancelEdit, draft, setDraft, draftRevision, refreshDraft, status, busy, selectRow, clearSelection, decide, beginEdit,
     undo, canUndo: undoStack.current.length > 0, pointerDown, pointerMove, pointerEnd, assign, jumpChapter, openRow, renameRole,
     recordingProgress, includeRoles,
-    decorate, saveProgress, openProgress, showDraft, editDraft,
+    decorate, saveProgress, openProgress, showDraft, editDraft, linkDraftEntries, unlinkDraftExchange,
   };
 }

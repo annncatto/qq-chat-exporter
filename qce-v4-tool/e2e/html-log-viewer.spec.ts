@@ -12,7 +12,7 @@ for (const inline of [true, false]) {
     try {
       const source = join(__dirname, '../../qce-chunked-viewer/assets/modern_chunked_app.js');
       const rows = ['Open\nDoor', 'Second line', 'Third line'].map((text, i) => ({
-        id: `msg-${i}`, ts: 1760000000000 + i, date: '2025-10-09', uid: 'uid-kp', uin: '10001',
+        id: `msg-${i}`, ts: 1760000000000 + i * 1000, date: '2025-10-09', uid: 'uid-kp', uin: '10001',
         name: '主持人', nameLower: '主持人', text: text.toLowerCase(), logText: text,
         html: `<div class="message-block"><div class="message ${i === 1 ? 'self' : 'other'}" id="msg-${i}"><div class="avatar"><span>主</span></div><div class="message-wrapper"><div class="message-header"><span class="sender">主持人</span></div><div class="message-bubble"><div class="content">${text}</div></div></div></div></div>`,
       }));
@@ -154,7 +154,7 @@ for (const inline of [true, false]) {
       await page.getByText('记录管理', { exact: true }).click();
       const additional = {
         chatInfo: { name: '补充记录' },
-        messages: [{ id: 'side-1', timestamp: 1759999999900, sender: { uid: 'uid-kp', uin: '10001', name: '另一个昵称' },
+        messages: [{ id: 'side-1', timestamp: 1760000000500, sender: { uid: 'uid-kp', uin: '10001', name: '另一个昵称' },
           content: { text: 'Before opening the door' } }],
       };
       await page.locator('input[aria-label="选择记录文件"]').setInputFiles({
@@ -191,8 +191,29 @@ for (const inline of [true, false]) {
       await draft.getByRole('button', { name: 'TXT', exact: true }).click();
       const mergedText = await readFile((await (await merged).path())!, 'utf8');
       expect(mergedText.indexOf('【KP】\nBefore opening the door')).toBeGreaterThanOrEqual(0);
-      expect(mergedText.indexOf('Before opening the door')).toBeLessThan(mergedText.indexOf('门打开了。'));
+      expect(mergedText.indexOf('门打开了。')).toBeLessThan(mergedText.indexOf('Before opening the door'));
+      expect(mergedText.indexOf('Before opening the door')).toBeLessThan(mergedText.indexOf('Second line'));
+
+      await draft.getByRole('button', { name: '连成一段', exact: true }).click();
+      await draft.getByRole('button', { name: '门打开了。', exact: true }).click();
+      await expect(draft.getByRole('button', { name: 'Before opening the door', exact: true })).toBeDisabled();
+      await draft.getByRole('button', { name: 'Second line', exact: true }).click();
+      await draft.getByRole('button', { name: '确认连段', exact: true }).click();
+      await expect(draft.getByRole('button', { name: '拆开此段', exact: true })).toBeVisible();
+      const grouped = page.waitForEvent('download');
+      await draft.getByRole('button', { name: 'TXT', exact: true }).click();
+      const groupedText = await readFile((await (await grouped).path())!, 'utf8');
+      expect(groupedText.indexOf('门打开了。')).toBeLessThan(groupedText.indexOf('Second line'));
+      expect(groupedText.indexOf('Second line')).toBeLessThan(groupedText.indexOf('Before opening the door'));
       await page.reload();
+      await page.getByRole('button', { name: '成稿', exact: true }).click();
+      await expect(draft.getByRole('button', { name: '拆开此段', exact: true })).toBeVisible();
+      await draft.getByRole('button', { name: '拆开此段', exact: true }).click();
+      await expect(draft.getByRole('button', { name: '拆开此段', exact: true })).toHaveCount(0);
+      await expect(draft.locator('article .qce-log-manuscript-line')).toHaveText([
+        '门打开了。', 'Before opening the door', 'Second line',
+      ]);
+      await draft.getByRole('button', { name: '关闭', exact: true }).click();
       await page.getByText('记录管理', { exact: true }).click();
       await expect(page.getByRole('button', { name: '补充记录', exact: true })).toBeVisible();
       await page.getByRole('button', { name: '补充记录', exact: true }).click();

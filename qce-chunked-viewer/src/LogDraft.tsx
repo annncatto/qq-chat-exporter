@@ -2,9 +2,11 @@ import { Fragment, useEffect, useMemo, useRef, useState } from 'react';
 import { Button } from '@/components/ui/button';
 import type { DraftEntry, DraftFormat, ReviewDraft } from './qce/log-review';
 
-export function LogDraft({ draft, onEdit, onExport, onClose }: {
+export function LogDraft({ draft, onEdit, onLink, onUnlink, onExport, onClose }: {
   draft: ReviewDraft;
   onEdit: (entry: DraftEntry, text: string) => void;
+  onLink: (entries: DraftEntry[]) => void;
+  onUnlink: (entry: DraftEntry) => void;
   onExport: (format: DraftFormat) => void;
   onClose: () => void;
 }) {
@@ -13,6 +15,7 @@ export function LogDraft({ draft, onEdit, onExport, onClose }: {
   const [limit, setLimit] = useState(60);
   const [editing, setEditing] = useState<DraftEntry | null>(null);
   const [text, setText] = useState('');
+  const [linkSelection, setLinkSelection] = useState<DraftEntry[] | null>(null);
   const panel = useRef<HTMLElement>(null);
   const drag = useRef<{ x: number; y: number; left: number; top: number } | null>(null);
   const [placement, setPlacement] = useState<{ left: number; top: number }>();
@@ -22,6 +25,15 @@ export function LogDraft({ draft, onEdit, onExport, onClose }: {
     const round = project.state.rounds[n] || '';
     return (!role || message.personId === role) && (!chapter || round === chapter) ? [n] : [];
   }), [project, role, chapter]);
+
+  function selectForExchange(entry: DraftEntry): void {
+    setLinkSelection(previous => {
+      if (!previous || (previous[0] && previous[0].key !== entry.key)) return previous;
+      return previous.some(item => item.index === entry.index)
+        ? previous.filter(item => item.index !== entry.index)
+        : [...previous, entry];
+    });
+  }
 
   function clamp(left: number, top: number) {
     const root = panel.current?.offsetParent;
@@ -83,11 +95,22 @@ export function LogDraft({ draft, onEdit, onExport, onClose }: {
         const body = project.state.edits[n] ?? message.text;
         const round = project.state.rounds[n] ?? '';
         const previous = i > 0 ? project.state.rounds[visible[i - 1]!] ?? '' : '';
+        const before = i > 0 ? entries[visible[i - 1]!] : undefined;
+        const startsExchange = entry.exchange !== undefined && (before?.key !== entry.key || before.exchange !== entry.exchange);
+        const selected = linkSelection?.some(item => item.key === entry.key && item.index === entry.index);
         return <Fragment key={entry.key + ':' + entry.index}>
           {round !== previous && <h2 className="qce-log-draft-round">{round || '未归类'}</h2>}
-          <article>
+          <article className={entry.exchange !== undefined ? 'qce-log-draft-exchange' : undefined}>
+            {startsExchange && !linkSelection && <div className="qce-log-exchange-header">
+              <span>已连成一段</span>
+              <button type="button" onClick={() => onUnlink(entry)}>拆开此段</button>
+            </div>}
             <header>【{people.get(message.personId)?.role || '系统'}】</header>
-            {editing?.key === entry.key && editing.index === entry.index ? <form onSubmit={event => {
+            {linkSelection && <p className="qce-log-draft-source">{entry.source}{message.time && ` · ${message.time}`}</p>}
+            {linkSelection ? <button type="button" className="qce-log-manuscript-line"
+              aria-pressed={selected} disabled={Boolean(linkSelection[0] && linkSelection[0].key !== entry.key)}
+              onClick={() => selectForExchange(entry)}>{body}</button>
+            : editing?.key === entry.key && editing.index === entry.index ? <form onSubmit={event => {
               event.preventDefault();
               if (!text.trim()) return;
               onEdit(entry, text);
@@ -103,11 +126,19 @@ export function LogDraft({ draft, onEdit, onExport, onClose }: {
       {!visible.length && <p>此筛选下暂无成稿。</p>}
       {visible.length > limit && <Button size="sm" variant="outline" onClick={() => setLimit(limit + 60)}>显示更多</Button>}
     </div>
-    <div className="qce-log-draft-bar">
-      <span>导出整份成稿</span>
+    {linkSelection ? <div className="qce-log-draft-bar">
+      <span className="mr-auto" aria-live="polite">{linkSelection.length ? `已选 ${linkSelection.length} 条` : '选择同一窗口的消息'}</span>
+      <Button size="sm" variant="ghost" onClick={() => setLinkSelection(null)}>取消</Button>
+      <Button size="sm" disabled={linkSelection.length < 2} onClick={() => {
+        onLink(linkSelection);
+        setLinkSelection(null);
+      }}>确认连段</Button>
+    </div> : <div className="qce-log-draft-bar">
+      <Button size="sm" variant="ghost" className="mr-auto" disabled={entries.length < 2 || editing !== null}
+        onClick={() => setLinkSelection([])}>连成一段</Button>
       <Button size="sm" variant="outline" onClick={() => onExport('txt')}>TXT</Button>
       <Button size="sm" variant="outline" onClick={() => onExport('md')}>Markdown</Button>
       <Button size="sm" variant="outline" onClick={() => onExport('html')}>HTML</Button>
-    </div>
+    </div>}
   </aside>;
 }
