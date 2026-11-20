@@ -884,7 +884,7 @@ jobs:
         with:
           name: qce-installer-windows
           path: release-files
-      - name: "校验各平台工作台及启动入口"
+      - name: "校验各平台的 HTML 查看器和启动入口"
         run: |
           python3 - <<'PY'
           import os
@@ -895,23 +895,27 @@ jobs:
           files = Path("release-files")
           version = os.environ["GITHUB_REF_NAME"]
           archive_root = "NapCat-QCE-Windows-x64"
-          workspace = "static/qce/log-editor/workspace.html"
-          page = "static/qce/log-editor/index.html"
+          page = "static/qce/index.html"
           windows_package = files / f"{archive_root}-{version}.zip"
           installer = files / f"QQChatExporter-Installer-{version}.exe"
+
+          def check_package(names, root, server):
+              if any(name.startswith(f"{root}/static/qce/log-editor/") for name in names):
+                  raise ValueError(f"{root}: found the old editor route")
+              if b'qce-log-tools' not in server or b'qce-html-log-progress-v1' not in server:
+                  raise ValueError(f"{root}: the server is missing the integrated HTML viewer")
 
           with installer.open("rb") as executable:
               if executable.read(2) != b"MZ":
                   raise ValueError("Invalid Windows installer executable")
           with zipfile.ZipFile(windows_package) as shell, zipfile.ZipFile(installer) as embedded:
               embedded.getinfo(f"{archive_root}/Uninstall QQ Chat Exporter.exe")
-              for name in ("launcher-user.bat", "qce-server.exe", page, workspace):
+              for name in ("launcher-user.bat", "qce-server.exe", page):
                   path = f"{archive_root}/{name}"
                   if shell.read(path) != embedded.read(path):
                       raise ValueError(f"Installer and Shell package differ: {name}")
-              editor = shell.read(f"{archive_root}/{workspace}")
-              if b'id="rr-file"' not in editor:
-                  raise ValueError("Windows package is missing the editor")
+              check_package(shell.namelist(), archive_root, shell.read(f"{archive_root}/qce-server.exe"))
+              check_package(embedded.namelist(), archive_root, embedded.read(f"{archive_root}/qce-server.exe"))
 
           for platform in ("Linux-x64", "macOS-arm64"):
               root = f"NapCat-QCE-{platform}"
@@ -920,11 +924,10 @@ jobs:
                       if not shell.getmember(f"{root}/{name}").mode & 0o111:
                           raise ValueError(f"{platform}: {name} is not executable")
                   shell.getmember(f"{root}/{page}")
-                  with shell.extractfile(f"{root}/{workspace}") as packaged_editor:
-                      if packaged_editor.read() != editor:
-                          raise ValueError(f"{platform}: packaged editor differs")
+                  with shell.extractfile(f"{root}/qce-server") as server:
+                      check_package(shell.getnames(), root, server.read())
           PY
-      - name: "发布跑团工作台预览版"
+      - name: "发布 QCE 预览版"
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -939,14 +942,20 @@ jobs:
           | Linux x64 Shell | `NapCat-QCE-Linux-x64-*.tar.gz` | 解压后运行 `./launcher-user.sh` |
           | macOS Apple Silicon Shell（预览） | `NapCat-QCE-macOS-arm64-*.tar.gz` | 完全退出桌面 QQ，解压后运行 `./launcher-user.sh` |
 
-          需要导出新记录时，用 QQ 扫码登录并打开 QCE。进入「跑团工作台」，选择「从 QQ 导入」或导入已有记录。
+          ## 从 QQ 导出并整理 Log
 
-          审阅时可拖选连续消息，批量归入章节或回合。重新编辑已确认的消息后，会跳到当前阅读窗的下一条。
+          用 QQ 扫码登录，在 QCE「会话」中选择聊天记录和时间范围，导出为 HTML。直接打开单文件 HTML，或解压流式 ZIP 后打开 `index.html`。
+
+          在同一页阅读记录、搜索、按成员／类型／日期筛选，并直接保留、排除或编辑消息。拖选连续消息可归入章节或回合。已确认的消息重新编辑后，保存会定位到下一条。
+
+          点「成稿」预览、编辑并导出 TXT、Markdown 或 HTML。进度自动保存在当前浏览器，也可在侧栏备份和恢复。
+
+          要让之前导出的记录使用新查看器，请用这个版本重新导出 HTML。
 
           此预览版内置经过 SHA-256 校验的 NapCat v4.18.42 归档包。构建验证覆盖打包和启动入口。真实 QQ 登录尚未完成跨平台联调。
           MD
           gh release create "$version" --repo "$GITHUB_REPOSITORY" --verify-tag \
-            --title "QCE 跑团工作台 $version" --prerelease --notes-file RELEASE_NOTES.md \
+            --title "QQ Chat Exporter $version" --prerelease --notes-file RELEASE_NOTES.md \
             "release-files/QQChatExporter-Installer-$version.exe" \
             "release-files/NapCat-QCE-Windows-x64-$version.zip" \
             "release-files/NapCat-QCE-Linux-x64-$version.tar.gz" \

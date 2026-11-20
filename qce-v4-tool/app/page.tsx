@@ -16,7 +16,6 @@ import {
   type SessionTaskStats,
 } from "@/lib/session-sort"
 import { isActiveExportTaskStatus } from "@/lib/export-task-state"
-import { logEditorSourcePath } from "@/lib/log-editor"
 
 const TaskWizard = lazy(() => import("@/components/ui/task-wizard").then(m => ({ default: m.TaskWizard })))
 const ScheduledExportWizard = lazy(() => import("@/components/ui/scheduled-export-wizard").then(m => ({ default: m.ScheduledExportWizard })))
@@ -29,7 +28,6 @@ const GroupFilesModal = lazy(() => import("@/components/ui/group-files-modal").t
 const ExportTaskPlansPanel = lazy(() => import("@/components/export-plans/plans-panel").then(m => ({ default: m.ExportTaskPlansPanel })))
 const SettingsPanel = lazy(() => import("@/components/ui/settings-panel").then(m => ({ default: m.SettingsPanel })))
 const AboutPanel = lazy(() => import("@/components/ui/about-panel").then(m => ({ default: m.AboutPanel })))
-const LogEditorPanel = lazy(() => import("@/components/log-editor-panel").then(m => ({ default: m.LogEditorPanel })))
 import {
   Dialog,
   DialogContent,
@@ -87,9 +85,9 @@ import {
   Search,
   Square,
 } from "lucide-react"
-import type { CreateTaskForm, CreateScheduledExportForm, ExportTask } from "@/types/api"
+import type { CreateTaskForm, CreateScheduledExportForm } from "@/types/api"
 import { useQCE } from "@/hooks/use-qce"
-import { BUILD_VERSION, isNewerVersion, isMajorUpdate, extractReleaseImage } from "@/lib/version"
+import { BUILD_VERSION, RELEASE_REPO, isNewerVersion, isMajorUpdate, extractReleaseImage } from "@/lib/version"
 import { UpdatePopover, type UpdateBannerInfo } from "@/components/ui/update-banner"
 import { SecurityExposureBanner } from "@/components/ui/security-exposure-banner"
 import AuthManager from "@/lib/auth"
@@ -181,7 +179,7 @@ const INLINE_DIVIDER = (
   <span aria-hidden className="mx-0.5 inline-block h-3 w-px translate-y-[2px] bg-current opacity-20" />
 )
 
-const VALID_TABS = ["overview", "sessions", "tasks", "plans", "scheduled", "history", "stickers", "settings", "about", "log-editor"] as const
+const VALID_TABS = ["overview", "sessions", "tasks", "plans", "scheduled", "history", "stickers", "settings", "about"] as const
 type TabId = typeof VALID_TABS[number]
 
 const TAB_PATH_MAP: Record<string, TabId> = {
@@ -195,7 +193,6 @@ const TAB_PATH_MAP: Record<string, TabId> = {
   "stickers": "stickers",
   "settings": "settings",
   "about": "about",
-  "log-editor": "log-editor",
 }
 
 function getTabFromPath(): TabId {
@@ -212,10 +209,6 @@ export default function QCEDashboard({ initialTab }: { initialTab?: string } = {
     return (initialTab as TabId) || "overview"
   })
   const [isTaskWizardOpen, setIsTaskWizardOpen] = useState(false)
-  const [organizeAfterExport, setOrganizeAfterExport] = useState(false)
-  const [pendingEditorTaskIds, setPendingEditorTaskIds] = useState<string[]>([])
-  const [logEditorTask, setLogEditorTask] = useState<ExportTask | null>(null)
-  const [hasOpenedEditor, setHasOpenedEditor] = useState(false)
   const [selectedPreset, setSelectedPreset] = useState<Partial<CreateTaskForm> | undefined>()
   const [isScheduledExportWizardOpen, setIsScheduledExportWizardOpen] = useState(false)
   const [selectedScheduledPreset, setSelectedScheduledPreset] = useState<Partial<CreateScheduledExportForm> | undefined>()
@@ -493,44 +486,12 @@ export default function QCEDashboard({ initialTab }: { initialTab?: string } = {
   } = useQCE({ onNotification: handleQceNotification })
 
   useEffect(() => {
-    if (activeTab === 'log-editor') setHasOpenedEditor(true)
-  }, [activeTab])
-
-  useEffect(() => {
-    if (!pendingEditorTaskIds.length) return
-    const candidates = pendingEditorTaskIds.flatMap(id => {
-      const task = tasks.find(item => item.id === id)
-      return task ? [task] : []
-    })
-    const ready = logEditorTask ? undefined : candidates.find(task => logEditorSourcePath(task))
-    const handled = new Set(candidates
-      .filter(task => task.id === ready?.id || task.status === 'failed' || task.status === 'cancelled')
-      .map(task => task.id))
-    if (ready) setLogEditorTask(ready)
-    if (handled.size) setPendingEditorTaskIds(ids => ids.filter(id => !handled.has(id)))
-  }, [tasks, pendingEditorTaskIds, logEditorTask])
-
-  const queueEditorTask = (taskId: string) => {
-    if (logEditorTask?.id === taskId) return
-    setPendingEditorTaskIds(ids => ids.includes(taskId) ? ids : [...ids, taskId])
-  }
-
-  const finishEditorTask = useCallback((taskId: string) => {
-    setLogEditorTask(task => task?.id === taskId ? null : task)
-  }, [])
-
-  const openLogEditor = (task: ExportTask) => {
-    queueEditorTask(task.id)
-    setActiveTab('log-editor')
-  }
-
-  useEffect(() => {
     const currentVersion = systemInfo?.version || BUILD_VERSION
     if (!currentVersion || currentVersion === 'unknown') return
 
     const checkUpdate = async () => {
       try {
-        const res = await fetch('https://api.github.com/repos/shuakami/qq-chat-exporter/releases?per_page=1')
+        const res = await fetch(`https://api.github.com/repos/${RELEASE_REPO}/releases?per_page=1`)
         if (!res.ok) return
 
         const releases = await res.json()
@@ -739,14 +700,7 @@ export default function QCEDashboard({ initialTab }: { initialTab?: string } = {
   const [gallerySearchActive, setGallerySearchActive] = useState('')
 
   const handleOpenTaskWizard = useCallback((preset?: Partial<CreateTaskForm>) => {
-    setOrganizeAfterExport(false)
     setSelectedPreset(preset)
-    setIsTaskWizardOpen(true)
-  }, [])
-
-  const handleOrganize = useCallback((preset?: Partial<CreateTaskForm>) => {
-    setOrganizeAfterExport(true)
-    setSelectedPreset({ ...preset, format: 'JSON', streamingZipMode: false, exportAsZip: false, filterPureImageMessages: false })
     setIsTaskWizardOpen(true)
   }, [])
 
@@ -1038,11 +992,10 @@ export default function QCEDashboard({ initialTab }: { initialTab?: string } = {
   }
 
   const handleCreateTask = async (form: CreateTaskForm) => {
-    const exportForm: CreateTaskForm = organizeAfterExport ? { ...form, format: 'JSON', streamingZipMode: false, exportAsZip: false } : form
-    const success = await createTask(exportForm, organizeAfterExport ? queueEditorTask : undefined)
+    const success = await createTask(form)
     if (success) {
       tasksLoadedRef.current = false
-      setActiveTab(organizeAfterExport ? "log-editor" : "tasks")
+      setActiveTab("tasks")
     }
     return success
   }
@@ -1563,7 +1516,6 @@ export default function QCEDashboard({ initialTab }: { initialTab?: string } = {
   // Navigation items configuration
   const navItems = [
     { id: "overview", label: "概览", icon: Activity },
-    { id: "log-editor", label: "跑团工作台", icon: FileText },
     { id: "sessions", label: "会话", icon: MessageCircle },
     { id: "tasks", label: "任务", icon: Zap },
     { id: "plans", label: "导出任务", icon: Layers },
@@ -1579,7 +1531,6 @@ export default function QCEDashboard({ initialTab }: { initialTab?: string } = {
 
   // Page titles mapping
   const pageTitles: Record<string, string> = {
-    'log-editor': '跑团工作台',
     overview: "概览",
     sessions: "会话",
     tasks: "任务",
@@ -1789,7 +1740,7 @@ export default function QCEDashboard({ initialTab }: { initialTab?: string } = {
                         </DropdownMenuItem>
                         <DropdownMenuItem asChild>
                           <a
-                            href="https://github.com/shuakami/qq-chat-exporter/releases"
+                            href={`https://github.com/${RELEASE_REPO}/releases`}
                             target="_blank"
                             rel="noopener noreferrer"
                             className="flex items-center gap-2 cursor-pointer"
@@ -1839,11 +1790,6 @@ export default function QCEDashboard({ initialTab }: { initialTab?: string } = {
           <div className="flex items-center gap-2">
             {/* Page-specific actions */}
 
-            {activeTab === "log-editor" && !isStandalone && systemInfo?.napcat.online && (
-              <Button size="sm" variant="outline" className="h-8 rounded-full" onClick={() => handleOrganize()}>
-                从 QQ 导入
-              </Button>
-            )}
             {activeTab === "sessions" && !isStandalone && (
               <>
                 <Button size="sm" variant="ghost" className="h-8 text-[13px] rounded-full px-2" onClick={loadChatData} disabled={isLoading}>
@@ -2051,10 +1997,7 @@ export default function QCEDashboard({ initialTab }: { initialTab?: string } = {
                 </div>
 
                 {/* Quick actions */}
-                <div className="flex flex-wrap items-center gap-3">
-                  <Button variant="outline" onClick={() => setActiveTab("log-editor")} className="rounded-full">
-                    打开跑团工作台
-                  </Button>
+                <div className="flex items-center gap-3">
                   <Button onClick={() => handleOpenTaskWizard()} className="rounded-full">
                     新建任务
                   </Button>
@@ -2155,10 +2098,10 @@ export default function QCEDashboard({ initialTab }: { initialTab?: string } = {
                   >
                     <div className="space-y-1.5 min-w-0">
                       <h3 className="text-[15px] font-semibold text-foreground">
-                        独立模式 · 使用本地聊天记录
+                        独立模式：仅可浏览已导出的内容
                       </h3>
                       <p className="text-[13px] text-muted-foreground/80 leading-relaxed">
-                        可以在跑团工作台导入本地记录。需要从 QQ 导出记录时，请用完整模式启动并登录 QQ。
+                        独立模式下暂时无法预览群聊、好友列表。如需导出新记录，请用完整模式启动并登录 QQ。
                       </p>
                     </div>
                     <div className="flex flex-wrap gap-2 pt-1">
@@ -2169,14 +2112,6 @@ export default function QCEDashboard({ initialTab }: { initialTab?: string } = {
                         onClick={() => setActiveTab("history")}
                       >
                         浏览聊天记录
-                      </Button>
-                      <Button
-                        size="sm"
-                        variant="outline"
-                        className="h-8 text-[13px] rounded-full px-3"
-                        onClick={() => setActiveTab("log-editor")}
-                      >
-                        打开跑团工作台
                       </Button>
                       <Button
                         size="sm"
@@ -2213,7 +2148,6 @@ export default function QCEDashboard({ initialTab }: { initialTab?: string } = {
                       onOpenBatchExportDialog={handleOpenBatchExportDialog}
                       onPreviewChat={handlePreviewChat}
                       onOpenTaskWizard={handleOpenTaskWizard}
-                      onOrganize={handleOrganize}
                       onExportGroupAvatars={handleExportGroupAvatars}
                       onOpenEssenceModal={handleOpenEssenceModal}
                       onOpenGroupFilesModal={handleOpenGroupFilesModal}
@@ -2408,7 +2342,6 @@ export default function QCEDashboard({ initialTab }: { initialTab?: string } = {
                         )}
                         {task.status === "completed" && (
                           <>
-                            {logEditorSourcePath(task) && <Button size="sm" variant="ghost" className="h-9 rounded-full px-3 text-sm" onClick={() => openLogEditor(task)}>整理</Button>}
                             <Button
                               size="sm"
                               variant="ghost"
@@ -2452,17 +2385,6 @@ export default function QCEDashboard({ initialTab }: { initialTab?: string } = {
                 )}
               </div>
             )}
-
-            {(activeTab === 'log-editor' || hasOpenedEditor) && <div hidden={activeTab !== 'log-editor'}>
-              <Suspense fallback={<div className="flex justify-center py-12"><Loader size={24} /></div>}>
-                <LogEditorPanel
-                  active={activeTab === 'log-editor'}
-                  task={logEditorTask}
-                  waiting={pendingEditorTaskIds.length}
-                  onTaskFinished={finishEditorTask}
-                />
-              </Suspense>
-            </div>}
 
             {/* ==================== EXPORT TASK PLANS (Issue #641) ==================== */}
             {activeTab === "plans" && (
@@ -3312,7 +3234,6 @@ export default function QCEDashboard({ initialTab }: { initialTab?: string } = {
         isOpen={isTaskWizardOpen}
         onClose={handleCloseTaskWizard}
         onSubmit={handleCreateTask}
-        forLogEditing={organizeAfterExport}
         isLoading={isLoading}
         prefilledData={selectedPreset}
         groups={groups}

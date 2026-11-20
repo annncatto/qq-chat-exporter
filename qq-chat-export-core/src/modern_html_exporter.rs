@@ -903,10 +903,12 @@ impl ModernHtmlExporter {
                     "ts": ts,
                     "date": date_key,
                     "uid": sender_uid,
+                    "uin": &message.sender.uin,
                     "name": sender_name,
                     "nameLower": sender_name_lower,
                     "text": stored_text,
                     "textTruncated": text_truncated,
+                    "logText": plain,
                     "html": html,
                 });
                 let json_str = record.to_string();

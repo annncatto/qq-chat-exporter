@@ -115,3 +115,62 @@ mark.hl {
 .skel-body { display: flex; flex-direction: column; gap: 3px; }
 .skel-name { width: 72px; height: 11px; margin: 0 2px; }
 .skel-bubble { height: 38px; border-radius: 16px; }
+.qce-log-top,
+.qce-log-tools,
+.qce-log-draft-bar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: .375rem;
+  padding: .45rem .75rem;
+  border-color: var(--border);
+  background: var(--background);
+}
+
+.qce-log-top { border-bottom: 1px solid var(--border); }
+.qce-log-title { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: .875rem; font-weight: 600; }
+.qce-log-count, .qce-log-status { font-size: .75rem; color: var(--muted-foreground); }
+.qce-log-tools { border-top: 1px solid var(--border); justify-content: space-between; }
+.qce-log-tool-group { display: flex; flex-wrap: wrap; align-items: center; gap: .375rem; font-size: .75rem; }
+.qce-log-tool-group label { display: flex; align-items: center; gap: .25rem; }
+.qce-log-tool-group input:not([type='checkbox']) { width: 8rem; }
+.qce-log-status { padding: .2rem .75rem; }
+.qce-log-tools kbd { font-size: .65rem; opacity: .75; }
+.qce-log-tools .qce-log-touch { display: none; }
+.qce-log-range { touch-action: none; user-select: none; }
+.qce-log-export-details { display: grid; grid-template-columns: auto 1fr; gap: .2rem .75rem; margin-top: .35rem; }
+.qce-log-export-details dd { text-align: right; }
+.qce-log-roles input, .qce-log-roles select { display: block; width: 100%; margin-top: .4rem; }
+.qce-log-chapters { width: 100%; margin-top: .4rem; table-layout: fixed; }
+.qce-log-chapters :is(th, td) { border-bottom: 1px solid var(--border); text-align: left; padding: .2rem 0; overflow-wrap: anywhere; }
+.qce-log-chapters :is(th, td):last-child { text-align: right; width: 3rem; }
+.qce-log-chapters button { cursor: pointer; text-align: left; }
+.qce-log-roles input, .qce-log-roles select, .qce-log-tools input:not([type='checkbox']), .qce-log-draft select, .qce-log-edit textarea, .qce-log-draft textarea {
+  border: 1px solid var(--border);
+  border-radius: .45rem;
+  padding: .25rem .5rem;
+  background: var(--background);
+  color: var(--foreground);
+}
+
+.qce-log-current { background: color-mix(in srgb, #66a5fb 15%, transparent); }
+.qce-log-selected { background: color-mix(in srgb, #66a5fb 27%, transparent); }
+.qce-log-message-meta, .qce-log-edited { max-width: 52rem; margin: 0 auto; padding: .1rem .8rem .45rem; }
+.qce-log-message-meta { color: var(--muted-foreground); font-size: .6875rem; }
+.qce-log-edited { white-space: pre-wrap; overflow-wrap: anywhere; font-size: .875rem; }
+.qce-log-edited::before { display: block; content: '成稿正文'; color: var(--muted-foreground); font-size: .6875rem; }
+
+.qce-log-edit { display: grid; gap: .375rem; padding: .5rem .75rem; border-top: 1px solid var(--border); font-size: .8rem; }
+.qce-log-edit textarea, .qce-log-draft textarea { width: 100%; min-height: 4.5rem; resize: vertical; }
+.qce-log-edit-actions { display: flex; justify-content: flex-end; gap: .375rem; }
+.qce-log-draft { position: absolute; z-index: 25; right: .75rem; bottom: 4rem; display: flex; flex-direction: column; width: min(30rem, calc(100% - 1.5rem)); max-height: calc(100% - 8rem); background: var(--background); border: 1px solid var(--border); border-radius: .75rem; box-shadow: 0 .65rem 2rem #0002; font-size: .8125rem; overflow: hidden; }
+.qce-log-draft-bar { min-height: 2.5rem; }
+.qce-log-draft-text { min-height: 0; overflow: auto; padding: .5rem .75rem; }
+.qce-log-draft-text article { border-bottom: 1px solid var(--border); padding: .4rem 0; }
+.qce-log-manuscript-line { display: block; width: 100%; text-align: left; white-space: pre-wrap; overflow-wrap: anywhere; }
+.qce-log-draft-bar select { max-width: 8rem; }
+
+@media (pointer: coarse) {
+  .qce-log-tools .qce-log-touch { display: inline-flex; }
+  .qce-log-tools kbd { display: none; }
+}

@@ -15,7 +15,7 @@
  */
 
 import { test, expect } from '@playwright/test';
-import { isNewerVersion } from '../lib/version';
+import { isNewerVersion, RELEASE_REPO } from '../lib/version';
 
 const TOKEN = process.env.QCE_MOCK_TOKEN ?? 'qce_mock_token_for_tests';
 const FRONTEND_BASE = process.env.E2E_FRONTEND_URL ?? 'http://localhost:40653';
@@ -144,6 +144,8 @@ test.describe('Version updates', () => {
         expect(isNewerVersion('v6.0.0', '6.0.0-rc.2')).toBe(true);
         expect(isNewerVersion('v6.0.0-beta.66', '6.0.0')).toBe(false);
         expect(isNewerVersion('v6.0.1-beta.1', '6.0.0')).toBe(true);
+        expect(isNewerVersion('v6.4.3-log.2', '6.4.3-log.1')).toBe(true);
+        expect(isNewerVersion('v6.4.3-log.1', '6.4.3-log.2')).toBe(false);
         expect(isNewerVersion('latest', '6.0.0')).toBe(false);
     });
 
@@ -153,14 +155,14 @@ test.describe('Version updates', () => {
             localStorage.setItem('qce_access_token', value);
         }, TOKEN);
         await page.route(
-            'https://api.github.com/repos/shuakami/qq-chat-exporter/releases?**',
+            `https://api.github.com/repos/${RELEASE_REPO}/releases?**`,
             async (route) => {
                 await route.fulfill({
                     status: 200,
                     contentType: 'application/json',
                     body: JSON.stringify([{
                         tag_name: 'v6.0.0',
-                        html_url: 'https://github.com/shuakami/qq-chat-exporter/releases/tag/v6.0.0',
+                        html_url: `https://github.com/${RELEASE_REPO}/releases/tag/v6.0.0`,
                     }]),
                 });
             }
@@ -1388,14 +1390,8 @@ test.describe('Standalone mode (issue #340)', () => {
         // 引导卡片可见。
         const banner = page.getByTestId('sessions-standalone-banner');
         await expect(banner).toBeVisible({ timeout: 10_000 });
-        await expect(banner.getByText('独立模式 · 使用本地聊天记录')).toBeVisible();
+        await expect(banner.getByText('独立模式：仅可浏览已导出的内容')).toBeVisible();
         await expect(banner.getByRole('button', { name: /浏览聊天记录/ })).toBeVisible();
-
-        await banner.getByRole('button', { name: '打开跑团工作台' }).click();
-        const editor = page.frameLocator('iframe[title="跑团 log 整理"]');
-        await expect(editor.getByRole('button', { name: '导入记录', exact: true })).toBeVisible();
-        await expect(page.getByRole('button', { name: '从 QQ 导入' })).toHaveCount(0);
-        await sessionsTab.click();
 
         // 给一点时间确保前端没有偷偷发请求。
         await page.waitForTimeout(800);

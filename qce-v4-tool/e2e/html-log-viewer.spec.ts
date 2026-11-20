@@ -1,0 +1,122 @@
+import { expect, test } from '@playwright/test';
+import { copyFile, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
+
+test.use({ video: 'off' });
+
+for (const inline of [true, false]) {
+  test(`${inline ? 'single-file' : 'chunked'} HTML opens with native reading and Log review on one page`, async ({ page }) => {
+    const dir = await mkdtemp(join(tmpdir(), 'qce-html-log-'));
+    try {
+      const source = join(__dirname, '../../qce-chunked-viewer/assets/modern_chunked_app.js');
+      const rows = ['Open\nDoor', 'Second line', 'Third line'].map((text, i) => ({
+        id: `msg-${i}`, ts: 1760000000000 + i, date: '2025-10-09', uid: 'uid-kp', uin: '10001',
+        name: '主持人', nameLower: '主持人', text: text.toLowerCase(), logText: text,
+        html: `<div class="message-block"><div class="message other" id="msg-${i}"><div class="message-wrapper"><div class="message-header"><span class="sender">主持人</span></div><div class="message-bubble"><div class="content">${text}</div></div></div></div></div>`,
+      }));
+      const data = [rows.slice(0, 2), rows.slice(2)];
+      const chunks = data.map((messages, i) => ({
+        id: String(i), file: `data/chunk-${i}.js`, count: messages.length, bytes: 1000,
+        startTs: messages[0]!.ts, endTs: messages[messages.length - 1]!.ts, startDate: '2025-10-09', endDate: '2025-10-09',
+        firstMsgId: messages[0]!.id, lastMsgId: messages[messages.length - 1]!.id, textBloom: '', senderBloom: '',
+      }));
+      const manifest = {
+        format: 'qce-modern-html-chunked', version: 1, exportTime: '2026-11-20T10:00:00+09:00',
+        chat: { name: '测试记录', type: 'group' }, stats: { totalMessages: rows.length, minDateKey: '2025-10-09', maxDateKey: '2025-10-09' },
+        chunking: { maxMessagesPerChunk: 2 }, bloom: { textBits: 0, textHashes: 0, senderBits: 0, senderHashes: 0 },
+        senders: [{ uid: 'uid-kp', displayName: '主持人', count: 3, avatar: 'https://q.qlogo.cn/g?b=qq&nk=10001&s=100' }],
+        chunks,
+      };
+      const index = join(dir, 'index.html');
+      if (inline) {
+        const inlineData = { manifest, chunks: Object.fromEntries(data.map((messages, i) => [String(i), messages])), msgid: {} };
+        const bundle = (await readFile(source, 'utf8')).replace(/<\/script/gi, '<\\/script');
+        await writeFile(index, `<!doctype html><meta charset="utf-8"><div id="root"></div><script>window.__QCE_INLINE__=${JSON.stringify(inlineData)}</script><script>${bundle}</script>`);
+      } else {
+        await mkdir(join(dir, 'data'));
+        await writeFile(join(dir, 'data', 'manifest.js'), `window.__QCE_MANIFEST__(${JSON.stringify(manifest)})`);
+        for (const [i, messages] of data.entries())
+          await writeFile(join(dir, 'data', `chunk-${i}.js`), `window.__QCE_CHUNK__(${JSON.stringify({ id: String(i), messages })})`);
+        await copyFile(source, join(dir, 'app.js'));
+        await writeFile(index, '<!doctype html><meta charset="utf-8"><div id="root"></div><script src="app.js" defer></script>');
+      }
+      await page.route('https://**', route => route.abort());
+      await page.goto(pathToFileURL(index).href);
+      const viewport = page.locator('#viewport');
+      await expect(viewport.locator('#msg-2')).toBeVisible();
+      await expect(page.getByPlaceholder('搜索消息')).toBeVisible();
+      await page.getByPlaceholder('搜索消息').fill('second');
+      await page.getByPlaceholder('搜索消息').press('Enter');
+      await expect(viewport.locator('mark').first()).toHaveText('Second');
+      await viewport.locator('#msg-0 .content').click();
+      await page.getByRole('button', { name: '编辑 E', exact: true }).click();
+      await expect(page.locator('#qce-log-edit-text')).toHaveValue('Open\nDoor');
+      await page.locator('#qce-log-edit-text').fill('打开门。');
+      await page.locator('#qce-log-edit-text').press('Control+Enter');
+      await expect(viewport.locator('.qce-log-current')).toHaveAttribute('data-i', '1');
+      await page.keyboard.press('a');
+      await expect(viewport.locator('.qce-log-current')).toHaveAttribute('data-i', '2');
+      await page.keyboard.press('s');
+      await viewport.hover();
+      await page.mouse.wheel(0, -800);
+      await expect(viewport.locator('#msg-0 .content')).toBeInViewport();
+      await viewport.locator('#msg-0 .content').click();
+      await page.keyboard.press('e');
+      await page.locator('#qce-log-edit-text').fill('门打开了。');
+      await page.locator('#qce-log-edit-text').press('Control+Enter');
+      await expect(viewport.locator('.qce-log-current')).toHaveAttribute('data-i', '1');
+
+      await viewport.hover();
+      await page.mouse.wheel(0, -800);
+      await expect(viewport.locator('#msg-0 .content')).toBeInViewport();
+      await expect(viewport.locator('#msg-1 .content')).toBeInViewport();
+      const first = (await viewport.locator('#msg-0 .content').boundingBox())!;
+      const second = (await viewport.locator('#msg-1 .content').boundingBox())!;
+      await page.mouse.move(first.x + 6, first.y + 6);
+      await page.mouse.down();
+      await page.mouse.move(second.x + 6, second.y + 6, { steps: 8 });
+      await page.mouse.up();
+      await expect(page.getByText('已选 2 条')).toBeVisible();
+      await page.getByRole('textbox', { name: '章节或回合' }).fill('第一回合');
+      await page.getByRole('button', { name: '归入', exact: true }).click();
+      await expect(viewport.locator('[data-i="0"]')).toContainText('第一回合');
+      await expect(viewport.locator('[data-i="1"]')).toContainText('第一回合');
+      await page.getByText('章节／回合', { exact: true }).click();
+      await page.getByRole('button', { name: '第一回合', exact: true }).click();
+      await expect(viewport.locator('.qce-log-current')).toHaveAttribute('data-i', '0');
+
+      await page.getByText('角色管理', { exact: true }).click();
+      await page.getByLabel('选择角色账号').selectOption('uid-kp');
+      await page.getByRole('textbox', { name: '角色名', exact: true }).fill('KP');
+      await page.getByRole('textbox', { name: '角色名', exact: true }).press('Enter');
+      await page.getByText('整理进度', { exact: true }).click();
+      const saved = page.waitForEvent('download');
+      await page.getByRole('button', { name: '备份进度', exact: true }).click();
+      const backup = (await (await saved).path())!;
+      const project = JSON.parse(await readFile(backup, 'utf8'));
+      expect(project.progress.decisions).toEqual({ 0: 'keep', 1: 'keep', 2: 'exclude' });
+      expect(project.progress.chapters).toEqual({ 0: '第一回合', 1: '第一回合' });
+      await page.getByRole('button', { name: '成稿', exact: true }).click();
+      const draft = page.getByRole('complementary', { name: '成稿预览' });
+      await expect(draft).toContainText('【KP】');
+      await expect(draft).toContainText('门打开了。');
+      await expect(draft).not.toContainText('Third line');
+      const pending = page.waitForEvent('download');
+      await draft.getByRole('button', { name: 'TXT', exact: true }).click();
+      expect(await readFile((await (await pending).path())!, 'utf8')).toContain('【KP】\n门打开了。');
+      await page.reload();
+      await expect(page.getByText('已审 3 / 3')).toBeVisible();
+      await expect(viewport.locator('[data-i="0"]')).toContainText('门打开了。');
+      await page.evaluate(() => localStorage.clear());
+      await page.reload();
+      await expect(page.getByText('已审 0 / 3')).toBeVisible();
+      await page.locator('input[aria-label="整理进度文件"]').setInputFiles(backup);
+      await expect(page.getByText('已恢复整理进度。')).toBeVisible();
+      await expect(page.getByText('已审 3 / 3')).toBeVisible();
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+}

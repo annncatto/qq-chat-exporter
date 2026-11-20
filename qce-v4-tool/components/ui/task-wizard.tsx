@@ -254,7 +254,6 @@ interface TaskWizardProps {
   /** Issue #340：独立模式下群相关 API 不可用，隐藏手动输入群号 */
   isStandalone?: boolean
   taskStatsMap?: Record<string, SessionTaskStats | undefined>
-  forLogEditing?: boolean
 }
 
 export function TaskWizard({
@@ -271,7 +270,6 @@ export function TaskWizard({
   avatarExportLoading,
   isStandalone = false,
   taskStatsMap,
-  forLogEditing = false,
 }: TaskWizardProps) {
   const { apiCall } = useApi()
   const [searchTerm, setSearchTerm] = useState("")
@@ -1139,7 +1137,7 @@ export function TaskWizard({
               />
             </div>
 
-            {!forLogEditing && <div className="space-y-2">
+            <div className="space-y-2">
               <label className="text-[13px] font-medium text-foreground/80">导出格式</label>
               <div className="flex items-center flex-wrap gap-1 p-1 rounded-[20px] bg-black/[0.04] dark:bg-white/[0.06] w-fit max-w-full">
                 {(["JSON", "HTML", "TXT", "EXCEL"] as const).map((fmt) => {
@@ -1170,7 +1168,7 @@ export function TaskWizard({
                   )
                 })}
               </div>
-            </div>}
+            </div>
 
             <div className="space-y-2">
               <label className="text-[13px] font-medium text-foreground/80 flex items-center gap-1.5">
@@ -1358,7 +1356,7 @@ export function TaskWizard({
                   : "聊天记录很长时推荐：全程流式写入不占内存，产物按分块存储，适合50万+消息量的群聊。输出分块JSONL格式，便于程序逐行处理。",
                 tip: EXPORT_OPTION_TOOLTIPS.streaming,
                 visible:
-                  !forLogEditing && form.historySource !== "roaming" &&
+                  form.historySource !== "roaming" &&
                   (form.format === "HTML" || form.format === "JSON"),
                 highlight: true,
                 group: "性能与处理"
@@ -1580,19 +1578,17 @@ export function TaskWizard({
         className="inset-4 w-auto h-auto rounded-[24px] shadow-[0_20px_60px_-15px_rgba(0,0,0,0.14)] dark:shadow-[0_24px_80px_rgba(0,0,0,0.5)] overflow-hidden flex flex-col p-0"
       >
         <DialogTitle className="sr-only">
-          {forLogEditing ? "导出并整理" : form.historySource === "roaming" ? "创建漫游导出任务" : "创建导出任务"}
+          {form.historySource === "roaming" ? "创建漫游导出任务" : "创建导出任务"}
         </DialogTitle>
 
         <div className="flex-1 flex min-h-0 w-full">
           {/* 左侧 */}
           <div className="w-2/5 max-w-[500px] min-w-[300px] flex-shrink-0 flex flex-col pt-12 pl-12 pr-8 pb-6">
             <h1 className="text-[20px] font-semibold text-foreground mb-2">
-              {forLogEditing ? "导出并整理" : form.historySource === "roaming" ? "创建漫游导出任务" : "创建导出任务"}
+              {form.historySource === "roaming" ? "创建漫游导出任务" : "创建导出任务"}
             </h1>
             <p className="text-[13px] text-muted-foreground mb-8 leading-relaxed">
-              {forLogEditing
-                ? "选择会话和时间范围，记录会自动进入工作台。"
-                : form.historySource === "roaming"
+              {form.historySource === "roaming"
                 ? "选择日期范围，后台会扫描当前账号可见的私聊漫游记录并生成导出文件。"
                 : "配置您的导出偏好，确认无误后即可开始导出。"}
             </p>
@@ -1680,7 +1676,7 @@ export function TaskWizard({
               disabled={!canSubmit() || isLoading}
               className="rounded-full text-[13px] h-8 px-6 bg-[#317CFF] text-white hover:bg-[#2867d6]"
             >
-              {isLoading ? '创建中...' : forLogEditing ? '开始整理' : form.historySource === "roaming" ? '开始漫游导出' : '创建任务'}
+              {isLoading ? '创建中...' : form.historySource === "roaming" ? '开始漫游导出' : '创建任务'}
             </Button>
           </div>
         </div>

@@ -8,6 +8,7 @@
 
 /** 构建时注入的版本号 */
 export const BUILD_VERSION = process.env.QCE_VERSION || 'unknown';
+export const RELEASE_REPO = 'annncatto/qq-chat-exporter-log';
 
 /** 获取版本显示文本 */
 export function getVersionDisplay(apiVersion?: string): string {
@@ -23,15 +24,15 @@ function parseVersion(version: string): number[] | null {
     const match = version
         .trim()
         .replace(/^v/i, '')
-        .match(/^(\d+)\.(\d+)\.(\d+)(?:-(alpha|beta|rc)\.(\d+))?$/i);
+        .match(/^(\d+)\.(\d+)\.(\d+)(?:-(alpha|beta|rc|log)\.(\d+))?$/i);
     if (!match) {
         return null;
     }
 
     const channel = match[4]?.toLowerCase();
     const channelRank = channel
-        ? { alpha: 0, beta: 1, rc: 2 }[channel as 'alpha' | 'beta' | 'rc']
-        : 3;
+        ? { alpha: 0, beta: 1, rc: 2, log: 3 }[channel as 'alpha' | 'beta' | 'rc' | 'log']
+        : 4;
     return [
         Number(match[1]),
         Number(match[2]),

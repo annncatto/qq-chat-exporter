@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import type { DataSource } from './hyperscroll';
 import { FilteredDataSource, HyperScroll } from './hyperscroll';
 import {
@@ -41,6 +41,9 @@ import { Loader } from '@/components/ui/loader';
 import { MediaPreview, downloadUrl, type MediaItem } from '@/components/ui/media-preview';
 import { createTextBloomProbe, createTokenBloomProbe } from './qce/bloom';
 import { ChunkStore, loadManifest, type QceManifest } from './qce/chunk-store';
+import { roleKey } from './qce/log-review';
+import { useLogReview } from './useLogReview';
+import { LogDraft } from './LogDraft';
 import {
   installMediaFallback,
   replaceMediaWithFallback,
@@ -156,10 +159,6 @@ function skeletonHtml(i: number): string {
     `<span class="skel skel-bubble" style="width:${180 + ((i * 97) % 260)}px"></span></div>` +
     `</div></div>`
   );
-}
-
-function rowHtml(i: number, inner: string): string {
-  return `<div class="hs-item" data-i="${i}">${inner}</div>`;
 }
 
 const SEEK_AVATAR = /<div class="avatar">[\s\S]*?<\/div>/gi;
@@ -287,6 +286,7 @@ export default function Viewer(): React.ReactElement {
   );
   const playingVoiceRef = useRef<HTMLElement | null>(null);
   const playingSrcRef = useRef('');
+  const review = useLogReview(storeRef, engineRef, filterSourceRef, viewportRef);
 
   const [manifest, setManifest] = useState<QceManifest | null>(null);
   const [filters, setFilters] = useState<Filters>(NO_FILTERS);
@@ -299,6 +299,8 @@ export default function Viewer(): React.ReactElement {
   const [canNav, setCanNav] = useState(false);
   const [canClear, setCanClear] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [roleSender, setRoleSender] = useState('');
   const [loadedChunks, setLoadedChunks] = useState(0);
   const [preview, setPreview] = useState<MediaItem | null>(null);
   const [searching, setSearching] = useState(false);
@@ -306,6 +308,7 @@ export default function Viewer(): React.ReactElement {
   const [settings, setSettings] = useState<QceSettings>(loadSettings);
   const [replyReturnId, setReplyReturnId] = useState<string | null>(null);
   const settingsRef = useRef(settings);
+  const progressFileRef = useRef<HTMLInputElement>(null);
   const [dark, setDark] = useState(
     () =>
       document.documentElement.classList.contains('dark') ||
@@ -411,9 +414,27 @@ export default function Viewer(): React.ReactElement {
       if (src) setPreview({ type: 'video', src, name: video.getAttribute('data-name') || '视频' });
       return;
     }
+    if (!target.closest('a,button,input,textarea,label,select,[role="button"],.image-content img,.sticker-wrap')) {
+      const row = target.closest<HTMLElement>('.hs-item[data-i]');
+      if (row && !row.querySelector('.skel-row')) review.selectRow(Number(row.dataset.i));
+    }
   }
 
   function onViewportKeyDown(e: React.KeyboardEvent): void {
+    if (!e.repeat && !e.altKey && (e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z') {
+      e.preventDefault();
+      review.undo();
+      return;
+    }
+    if (!e.repeat && !e.altKey && !e.metaKey && !e.ctrlKey && !e.shiftKey && !review.edit) {
+      const key = e.key.toLowerCase();
+      if (key === 'a' || key === 's' || key === 'e') {
+        e.preventDefault();
+        if (key === 'e') void review.beginEdit();
+        else review.decide(key === 'a' ? 'keep' : 'exclude');
+        return;
+      }
+    }
     if (e.key !== 'Enter' && e.key !== ' ') return;
     const target = e.target as HTMLElement;
     const reply = target.closest('.reply-content[data-reply-to]');
@@ -538,7 +559,7 @@ export default function Viewer(): React.ReactElement {
       if (disposed) return;
       manifestRef.current = m;
       setManifest(m);
-      if (m.chat?.name) document.title = `聊天记录 - ${m.chat.name}`;
+      if (m.chat?.name) document.title = `跑团记录 - ${m.chat.name}`;
     });
     return () => {
       disposed = true;
@@ -551,6 +572,7 @@ export default function Viewer(): React.ReactElement {
     if (!el) return;
     const store = new ChunkStore('.', manifest);
     storeRef.current = store;
+    const reviewPosition = review.initialize(manifest);
     const engine = new HyperScroll(el, {
       dataSource: withHighlight(fullSourceOf(store)),
       keyboard: true,
@@ -567,7 +589,9 @@ export default function Viewer(): React.ReactElement {
       });
     };
 
-    if (settingsRef.current.rememberScroll) {
+    if (reviewPosition !== null && reviewPosition >= 0 && reviewPosition < manifest.stats.totalMessages) {
+      engine.scrollToIndex(reviewPosition, -12);
+    } else if (settingsRef.current.rememberScroll) {
       const saved = Number(localStorage.getItem('qce-scroll') ?? -1);
       if (saved > 0 && saved < manifest.stats.totalMessages) engine.scrollToIndex(saved);
     }
@@ -603,11 +627,11 @@ export default function Viewer(): React.ReactElement {
       count: store.manifest.stats.totalMessages,
       renderToString(i) {
         const rec = store.get(i);
-        return rec ? rowHtml(i, rec.html) : skeletonHtml(i);
+        return rec ? review.decorate(i, rec, rec.html) : skeletonHtml(i);
       },
       renderSeekToString(i) {
         const rec = store.get(i);
-        return rec ? rowHtml(i, withoutSeekMediaSources(rec.html)) : skeletonHtml(i);
+        return rec ? review.decorate(i, rec, withoutSeekMediaSources(rec.html)) : skeletonHtml(i);
       },
       estimateHeight: (i) => estimateRowHeight(store.get(i)),
     };
@@ -630,6 +654,7 @@ export default function Viewer(): React.ReactElement {
     const engine = engineRef.current;
     const store = storeRef.current;
     if (!engine || !store) return;
+    review.clearSelection();
     const run = ++filterRunRef.current;
     resetSearch();
     filtersRef.current = next;
@@ -646,7 +671,6 @@ export default function Viewer(): React.ReactElement {
     setFilterStatus('筛选中…');
     const senderProbe = createTokenBloomProbe(next.sender);
     void (async () => {
-      let skipped = 0;
       for (let c = 0; c < store.manifest.chunks.length; c++) {
         if (filterRunRef.current !== run) return;
         const meta = store.manifest.chunks[c]!;
@@ -654,7 +678,6 @@ export default function Viewer(): React.ReactElement {
           (next.endMs > 0 && meta.startTs > next.endMs) ||
           (next.startMs > 0 && meta.endTs < next.startMs);
         if (outsideRange || (next.sender && !store.senderMayContain(c, senderProbe))) {
-          skipped += 1;
           continue;
         }
         const records = await store.load(c);
@@ -677,7 +700,7 @@ export default function Viewer(): React.ReactElement {
       }
       if (filterRunRef.current !== run) return;
       engine.refresh();
-      setFilterStatus(`${src.count.toLocaleString()} 条结果，跳过 ${skipped} 个分块`);
+      setFilterStatus(`${src.count.toLocaleString()} 条结果`);
     })();
   }
 
@@ -723,7 +746,6 @@ export default function Viewer(): React.ReactElement {
     searchRef.current = s;
     const f = filtersRef.current;
     const textProbe = createTextBloomProbe(q);
-    const t0 = performance.now();
     void (async () => {
       let firstJump = true;
       for (let c = 0; c < store.manifest.chunks.length; c++) {
@@ -761,11 +783,8 @@ export default function Viewer(): React.ReactElement {
       if (s.cancelled) return;
       s.running = false;
       setSearching(false);
-      const ms = performance.now() - t0;
       if (s.matches.length === 0) {
-        setSearchStatus(
-          `无匹配，Bloom 跳过 ${s.chunksSkipped} 个分块，${(ms / 1000).toFixed(1)}s`,
-        );
+        setSearchStatus('没有匹配的消息');
       } else {
         jumpToMatch(Math.max(s.cursor, 0));
       }
@@ -776,14 +795,25 @@ export default function Viewer(): React.ReactElement {
   const stats = manifest?.stats;
   const senderEntry = manifest?.senders.find((s) => s.uid === filters.sender);
   const senderName = senderEntry?.displayName;
+  const selectedRole = manifest?.senders.find(sender => sender.uid === roleSender);
+  const selectedRoleKey = manifest && selectedRole ? roleKey(selectedRole, manifest) : '';
+  const reviewedCount = Object.keys(review.progress.decisions).length;
+  const chapters = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const chapter of Object.values(review.progress.chapters)) {
+      if (chapter) counts.set(chapter, (counts.get(chapter) || 0) + 1);
+    }
+    return [...counts];
+  }, [review.progress.chapters]);
 
   return (
     <div className="relative flex h-dvh bg-background text-foreground">
       {/* Sidebar */}
       <aside
-        className={`absolute inset-y-0 left-0 z-30 flex w-72 shrink-0 flex-col overflow-y-auto bg-background px-5 py-6 transition-transform duration-200 md:static md:translate-x-0 ${
-          sidebarOpen ? 'translate-x-0' : '-translate-x-full'
-        }`}
+        id="qce-viewer-sidebar"
+        className={`qce-log-sidebar absolute inset-y-0 left-0 z-30 flex w-[17rem] shrink-0 flex-col overflow-y-auto border-r border-border bg-background px-4 py-4 transition-transform duration-200 md:visible md:static md:translate-x-0 ${
+          sidebarOpen ? 'translate-x-0' : 'invisible -translate-x-full'
+        } ${sidebarCollapsed ? 'md:hidden' : ''}`}
       >
         <div>
           <div className="font-semibold text-base tracking-tight">{chat?.name ?? '加载中…'}</div>
@@ -803,29 +833,25 @@ export default function Viewer(): React.ReactElement {
               </div>
               <div className="contents">
                 <dt className="text-muted-foreground">范围</dt>
-                <dd className="flex items-center justify-end gap-1.5 whitespace-nowrap text-right font-medium tabular-nums">
+                <dd className="flex flex-wrap items-center justify-end gap-1.5 text-right font-medium tabular-nums">
                   {fmtDate(stats.minDateKey)}
-                  <MoveRightIcon className="size-3 shrink-0 text-muted-foreground" />
-                  {fmtDate(stats.maxDateKey)}
+                  {stats.minDateKey !== stats.maxDateKey && <>
+                    <MoveRightIcon className="size-3 shrink-0 text-muted-foreground" />
+                    {fmtDate(stats.maxDateKey)}
+                  </>}
                 </dd>
-              </div>
-              <div className="contents">
-                <dt className="text-muted-foreground">分块</dt>
-                <dd className="text-right font-medium tabular-nums">
-                  {manifest.chunks.length} × {manifest.chunking.maxMessagesPerChunk.toLocaleString()}
-                </dd>
-              </div>
-              <div className="contents">
-                <dt className="text-muted-foreground">已加载分块</dt>
-                <dd className="text-right font-medium tabular-nums">{loadedChunks}</dd>
-              </div>
-              <div className="contents">
-                <dt className="text-muted-foreground">导出时间</dt>
-                <dd className="text-right font-medium">{new Date(manifest.exportTime).toLocaleDateString('zh-CN')}</dd>
               </div>
             </dl>
+            <details className="mt-2 text-xs text-muted-foreground">
+              <summary className="cursor-pointer">导出详情</summary>
+              <dl className="qce-log-export-details">
+                <dt>分块</dt><dd>{manifest.chunks.length} × {manifest.chunking.maxMessagesPerChunk.toLocaleString()}</dd>
+                <dt>已加载分块</dt><dd>{loadedChunks}</dd>
+                <dt>导出时间</dt><dd>{new Date(manifest.exportTime).toLocaleDateString('zh-CN')}</dd>
+              </dl>
+            </details>
 
-            <div className="mt-8">
+            <div className="mt-5">
               <div className="font-medium text-muted-foreground text-xs">搜索</div>
               <InputGroup className="mt-2 w-full">
                 <InputGroupAddon>
@@ -968,7 +994,44 @@ export default function Viewer(): React.ReactElement {
           </>
         ) : null}
 
-        <div className="mt-auto space-y-2 pt-6 text-muted-foreground text-xs">
+        {manifest && manifest.senders.length > 0 && <details className="qce-log-roles mt-5 text-xs">
+          <summary className="cursor-pointer font-medium">角色管理</summary>
+          <select aria-label="选择角色账号" value={roleSender} onChange={event => setRoleSender(event.target.value)}>
+            <option value="">选择发言者</option>
+            {manifest.senders.map(sender => <option key={sender.uid} value={sender.uid}>{sender.displayName}{review.progress.roles[roleKey(sender, manifest)] ? ` · ${review.progress.roles[roleKey(sender, manifest)]}` : ''}</option>)}
+          </select>
+          {selectedRole && <input key={`${selectedRoleKey}:${review.progress.roles[selectedRoleKey] ?? ''}`} aria-label="角色名" placeholder={selectedRole.displayName} maxLength={80}
+            defaultValue={review.progress.roles[selectedRoleKey] ?? ''} onBlur={event => review.renameRole(selectedRoleKey, event.currentTarget.value)}
+            onKeyDown={event => { if (event.key === 'Enter') event.currentTarget.blur(); }} />}
+        </details>}
+
+        {chapters.length > 0 && <details className="mt-4 text-xs">
+          <summary className="cursor-pointer font-medium">章节／回合</summary>
+          <table className="qce-log-chapters">
+            <thead><tr><th>名称</th><th>消息</th></tr></thead>
+            <tbody>{chapters.map(([chapter, count]) => <tr key={chapter}>
+              <td><button type="button" onClick={() => { review.jumpChapter(chapter); setSidebarOpen(false); }}>{chapter}</button></td>
+              <td>{count}</td>
+            </tr>)}</tbody>
+          </table>
+        </details>}
+        {stats && stats.totalMessages > 0 && <details className="mt-4 text-xs">
+          <summary className="cursor-pointer font-medium">整理进度</summary>
+          <div className="mt-2 flex flex-wrap gap-1">
+            <Button variant="outline" size="sm" disabled={review.busy} onClick={review.saveProgress}>备份进度</Button>
+            <Button variant="outline" size="sm" disabled={review.busy} onClick={() => progressFileRef.current?.click()}>恢复进度</Button>
+            <input ref={progressFileRef} type="file" aria-label="整理进度文件" accept=".qcelog" hidden onChange={event => {
+              const file = event.currentTarget.files?.[0];
+              event.currentTarget.value = '';
+              if (file) {
+                setSidebarOpen(false);
+                void review.openProgress(file);
+              }
+            }} />
+          </div>
+        </details>}
+
+        <div className="mt-auto space-y-2 pt-5 text-muted-foreground text-xs">
           <div className="flex items-center justify-between gap-1.5">
             <a
               href={QCE_REPO}
@@ -1026,24 +1089,30 @@ export default function Viewer(): React.ReactElement {
 
       {/* Main */}
       <div className="relative flex min-w-0 flex-1 flex-col">
-        <Button
-          variant="ghost"
-          size="icon-sm"
-          className="absolute top-2 left-2 z-10 md:hidden"
-          aria-label="切换侧栏"
-          onClick={() => setSidebarOpen((v) => !v)}
-        >
-          <PanelLeftIcon />
-        </Button>
+        <header className="qce-log-top">
+          <Button variant="ghost" size="icon-sm" aria-label="切换侧栏" aria-controls="qce-viewer-sidebar" onClick={() => {
+            if (window.matchMedia('(min-width: 768px)').matches) setSidebarCollapsed(value => !value);
+            else setSidebarOpen(value => !value);
+          }}><PanelLeftIcon /></Button>
+          <span className={`qce-log-title${sidebarCollapsed ? '' : ' md:hidden'}`}>{chat?.name || '聊天记录'}</span>
+          {manifest && <span className="qce-log-count" aria-live="polite">已审 {reviewedCount.toLocaleString()} / {manifest.stats.totalMessages.toLocaleString()}</span>}
+          <Button variant="outline" size="sm" disabled={review.busy || !reviewedCount} onClick={() => review.draft ? review.setDraft(null) : void review.showDraft()}>成稿</Button>
+        </header>
 
         <div className="relative min-h-0 flex-1">
           <div className="pointer-events-none absolute inset-x-0 top-0 z-10 h-6 bg-gradient-to-b from-background to-transparent" />
           <div
             id="viewport"
             ref={viewportRef}
-            className="qce-viewport h-full"
+            className={`qce-viewport h-full${review.rangeMode ? ' qce-log-range' : ''}`}
+            tabIndex={0}
             onClick={onViewportClick}
             onKeyDown={onViewportKeyDown}
+            onPointerDown={review.pointerDown}
+            onPointerMove={review.pointerMove}
+            onPointerUp={review.pointerEnd}
+            onPointerCancel={review.pointerEnd}
+            onPointerLeave={review.pointerEnd}
           />
           {replyReturnId ? (
             <button
@@ -1060,6 +1129,45 @@ export default function Viewer(): React.ReactElement {
             </button>
           ) : null}
         </div>
+        {review.edit && <form className="qce-log-edit" onSubmit={event => {
+          event.preventDefault();
+          if (review.edit?.text.trim()) review.decide('keep', review.edit);
+        }}>
+          <label htmlFor="qce-log-edit-text">编辑第 {review.edit.index + 1} 条</label>
+          <textarea id="qce-log-edit-text" value={review.edit.text} autoFocus onChange={event => {
+            if (review.edit) review.setEdit({ ...review.edit, text: event.target.value });
+          }} onKeyDown={event => {
+            if (event.key === 'Escape') review.cancelEdit();
+            if ((event.ctrlKey || event.metaKey) && event.key === 'Enter' && review.edit?.text.trim()) {
+              event.preventDefault();
+              review.decide('keep', review.edit);
+            }
+          }} />
+          <div className="qce-log-edit-actions">
+            <Button type="button" size="sm" variant="ghost" onClick={review.cancelEdit}>取消</Button>
+            <Button type="submit" size="sm" disabled={!review.edit.text.trim()}>确认并继续</Button>
+          </div>
+        </form>}
+        {!review.edit && <footer className="qce-log-tools">
+          <div className="qce-log-tool-group">
+            <Button size="sm" disabled={review.busy || !stats?.totalMessages} onClick={() => review.decide('keep')}>保留 <kbd>A</kbd></Button>
+            <Button size="sm" variant="outline" disabled={review.busy || !stats?.totalMessages} onClick={() => review.decide('exclude')}>排除 <kbd>S</kbd></Button>
+            <Button size="sm" variant="outline" disabled={review.busy || !stats?.totalMessages} onClick={() => void review.beginEdit()}>编辑 <kbd>E</kbd></Button>
+            <Button size="sm" variant="ghost" disabled={!review.canUndo || review.busy} onClick={review.undo}>撤销</Button>
+          </div>
+          <div className="qce-log-tool-group">
+            <Button size="sm" variant="ghost" className="qce-log-touch" aria-pressed={review.rangeMode} onClick={() => review.setRangeMode(!review.rangeMode)}>选择范围</Button>
+            {review.selected.size > 0 && <>
+              <span aria-live="polite">已选 {review.selected.size} 条</span>
+              <Button size="sm" variant="ghost" onClick={review.clearSelection}>取消选择</Button>
+            </>}
+            <label><input type="checkbox" checked={review.autoChapter} onChange={event => review.setAutoChapter(event.target.checked)} /> 当前整理</label>
+            <input aria-label="章节或回合" placeholder="章节／回合" maxLength={60} value={review.chapter} onChange={event => review.setChapter(event.target.value)} />
+            {review.selected.size > 0 && <Button size="sm" variant="outline" disabled={!review.chapter.trim()} onClick={review.assign}>归入</Button>}
+          </div>
+        </footer>}
+        {review.status && <p className="qce-log-status" role="status">{review.status}</p>}
+        {review.draft && <LogDraft draft={review.draft} onEdit={review.editDraft} onExport={format => void review.showDraft(format)} onClose={() => review.setDraft(null)} />}
       </div>
 
       <MediaPreview item={preview} onClose={() => setPreview(null)} />

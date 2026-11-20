@@ -4,8 +4,7 @@
   "version": "5.5.80",
   "private": true,
   "scripts": {
-    "build": "node ../scripts/sync-log-editor-assets.mjs && next build",
-    "build:log-editor": "node ../scripts/build-log-editor.mjs",
+    "build": "next build",
     "dev": "next dev",
     "start": "next start",
     "test:e2e": "playwright test",

@@ -11,10 +11,12 @@ export interface QceRecord {
   ts: number;
   date: string;
   uid: string;
+  uin?: string | null;
   name: string;
   nameLower: string;
   text: string;
   textTruncated?: boolean;
+  logText?: string;
   /** Derived message kind (not part of the export format). */
   kind: string;
   html: string;

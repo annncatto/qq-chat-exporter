@@ -104,6 +104,48 @@ fn text_element(text: &str) -> MessageElement {
     }
 }
 
+#[tokio::test]
+async fn modern_html_carries_review_data_and_viewer_in_both_layouts() {
+    let temp = TestDir::new("html-log-review");
+    let text = "OPEN the door\nKeep this Line";
+    let messages = [message("log-test", 1_718_454_840_000, vec![text_element(text)])];
+    let inline = temp.join("log.html");
+    let mut exporter = ModernHtmlExporter::new(HtmlExportOptions {
+        output_path: inline.clone(),
+        ..HtmlExportOptions::default()
+    });
+    exporter
+        .export_single_inline(&messages, &chat_info())
+        .await
+        .expect("inline HTML with viewer");
+    let page = fs::read_to_string(inline).expect("read inline HTML");
+    let serialized = format!("\"logText\":{}", json!(text));
+    assert!(page.contains(&serialized));
+    assert!(page.contains("qce-log-current"));
+
+    let chunked = temp.join("streaming");
+    let mut exporter = ModernHtmlExporter::new(HtmlExportOptions {
+        output_path: chunked.join("index.html"),
+        ..HtmlExportOptions::default()
+    });
+    exporter
+        .export_chunked(&messages, &chat_info(), &ChunkedHtmlExportOptions::default())
+        .await
+        .expect("chunked HTML with viewer");
+    let source_chunk = fs::read_dir(chunked.join("data/chunks"))
+        .expect("open chunks")
+        .next()
+        .expect("test produces one chunk")
+        .expect("chunk path")
+        .path();
+    let source = fs::read_to_string(source_chunk).expect("read chunk data");
+    assert!(source.contains(&serialized));
+    assert!(source.contains("\"uin\":\"10001\""));
+    assert!(fs::read_to_string(chunked.join("assets/app.js"))
+        .expect("read shipped viewer")
+        .contains("qce-log-current"));
+}
+
 fn export_options(output_path: PathBuf) -> ExportOptions {
     ExportOptions {
         output_path,

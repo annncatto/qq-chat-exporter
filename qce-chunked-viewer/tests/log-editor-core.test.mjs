@@ -1,6 +1,8 @@
-const { test } = require("node:test");
-const assert = require("node:assert/strict");
-const C = require("../public/log-editor/core.js");
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import "../src/qce/log-core.js";
+
+const C = globalThis.LogEditorCore;
 const row = (id, uin, uid, name, text) => ({
   id: String(id),
   time: "2026-11-19 20:00:00",
