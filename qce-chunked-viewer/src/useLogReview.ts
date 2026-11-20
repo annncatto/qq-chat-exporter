@@ -10,6 +10,15 @@ import {
 
 type DragState = { id: number; index: number; x: number; y: number; started: boolean; end?: number };
 
+const keptMark = '<span class="qce-log-kept" role="img" aria-label="已保留" title="已保留">✓</span>';
+
+function markKeptMessage(html: string): string {
+  const avatar = /(<div class="message (?:self|other)"[^>]*>\s*)(<div class="avatar">[\s\S]*?<\/div>)/;
+  const marked = html.replace(avatar, `$1<div class="qce-log-avatar">$2${keptMark}</div>`);
+  if (marked !== html) return marked;
+  return html.replace(/(<div class="system-message-container[^"]*"[^>]*>)/, `$1${keptMark}`);
+}
+
 export function useLogReview(store: RefObject<ChunkStore | null>, engine: RefObject<HyperScroll | null>, filter: RefObject<FilteredDataSource | null>, viewport: RefObject<HTMLDivElement | null>) {
   const [progress, setProgress] = useState(emptyReview);
   const [selected, setSelected] = useState<ReadonlySet<number>>(new Set());
@@ -242,10 +251,11 @@ export function useLogReview(store: RefObject<ChunkStore | null>, engine: RefObj
     const chapter = current.chapters[index];
     const edit = current.edits[index];
     const role = store.current && current.roles[roleKey(row, store.current.manifest)];
-    const labels = [role, chapter, decision === 'keep' ? '已保留' : decision === 'exclude' ? '已排除' : ''].filter((s): s is string => !!s);
+    const labels = [role, chapter, decision === 'exclude' ? '已排除' : ''].filter((s): s is string => !!s);
     const meta = labels.length ? `<div class="qce-log-message-meta">${labels.map(escapeReviewText).join(' · ')}</div>` : '';
     const updated = edit === undefined ? '' : `<div class="qce-log-edited">${escapeReviewText(edit)}</div>`;
-    return `<div class="hs-item${flags}" data-i="${index}">${html}${meta}${updated}</div>`;
+    const message = decision === 'keep' ? markKeptMessage(html) : html;
+    return `<div class="hs-item${flags}" data-i="${index}">${message}${meta}${updated}</div>`;
   }
 
   function saveProgress(): void {

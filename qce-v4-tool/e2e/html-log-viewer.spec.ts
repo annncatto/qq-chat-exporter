@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
-test.use({ video: 'off' });
+test.use({ video: 'off', colorScheme: 'light' });
 
 for (const inline of [true, false]) {
   test(`${inline ? 'single-file' : 'chunked'} HTML opens with native reading and Log review on one page`, async ({ page }) => {
@@ -14,7 +14,7 @@ for (const inline of [true, false]) {
       const rows = ['Open\nDoor', 'Second line', 'Third line'].map((text, i) => ({
         id: `msg-${i}`, ts: 1760000000000 + i, date: '2025-10-09', uid: 'uid-kp', uin: '10001',
         name: '主持人', nameLower: '主持人', text: text.toLowerCase(), logText: text,
-        html: `<div class="message-block"><div class="message other" id="msg-${i}"><div class="message-wrapper"><div class="message-header"><span class="sender">主持人</span></div><div class="message-bubble"><div class="content">${text}</div></div></div></div></div>`,
+        html: `<div class="message-block"><div class="message ${i === 1 ? 'self' : 'other'}" id="msg-${i}"><div class="avatar"><span>主</span></div><div class="message-wrapper"><div class="message-header"><span class="sender">主持人</span></div><div class="message-bubble"><div class="content">${text}</div></div></div></div></div>`,
       }));
       const data = [rows.slice(0, 2), rows.slice(2)];
       const chunks = data.map((messages, i) => ({
@@ -46,6 +46,7 @@ for (const inline of [true, false]) {
       await page.goto(pathToFileURL(index).href);
       const viewport = page.locator('#viewport');
       await expect(viewport.locator('#msg-2')).toBeVisible();
+      await expect(page.getByRole('button', { name: '搜索', exact: true })).toHaveCSS('background-color', 'rgb(39, 81, 211)');
       await expect(page.getByPlaceholder('搜索消息')).toBeVisible();
       await page.getByPlaceholder('搜索消息').fill('second');
       await page.getByPlaceholder('搜索消息').press('Enter');
@@ -72,6 +73,13 @@ for (const inline of [true, false]) {
       await page.mouse.wheel(0, -800);
       await expect(viewport.locator('#msg-0 .content')).toBeInViewport();
       await expect(viewport.locator('#msg-1 .content')).toBeInViewport();
+      for (const i of [0, 1]) {
+        const kept = viewport.locator(`#msg-${i} .avatar + .qce-log-kept`);
+        await expect(kept).toBeVisible();
+        await expect(kept).toHaveText('✓');
+        await expect(kept).toHaveAttribute('aria-label', '已保留');
+      }
+      await expect(viewport.locator('#msg-2 .qce-log-kept')).toHaveCount(0);
       const first = (await viewport.locator('#msg-0 .content').boundingBox())!;
       const second = (await viewport.locator('#msg-1 .content').boundingBox())!;
       await page.mouse.move(first.x + 6, first.y + 6);

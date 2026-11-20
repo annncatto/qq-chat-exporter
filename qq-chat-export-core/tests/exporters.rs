@@ -108,7 +108,11 @@ fn text_element(text: &str) -> MessageElement {
 async fn modern_html_carries_review_data_and_viewer_in_both_layouts() {
     let temp = TestDir::new("html-log-review");
     let text = "OPEN the door\nKeep this Line";
-    let messages = [message("log-test", 1_718_454_840_000, vec![text_element(text)])];
+    let messages = [message(
+        "log-test",
+        1_718_454_840_000,
+        vec![text_element(text)],
+    )];
     let inline = temp.join("log.html");
     let mut exporter = ModernHtmlExporter::new(HtmlExportOptions {
         output_path: inline.clone(),
@@ -129,7 +133,11 @@ async fn modern_html_carries_review_data_and_viewer_in_both_layouts() {
         ..HtmlExportOptions::default()
     });
     exporter
-        .export_chunked(&messages, &chat_info(), &ChunkedHtmlExportOptions::default())
+        .export_chunked(
+            &messages,
+            &chat_info(),
+            &ChunkedHtmlExportOptions::default(),
+        )
         .await
         .expect("chunked HTML with viewer");
     let source_chunk = fs::read_dir(chunked.join("data/chunks"))

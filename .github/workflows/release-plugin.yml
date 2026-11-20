@@ -902,7 +902,7 @@ jobs:
           def check_package(names, root, server):
               if any(name.startswith(f"{root}/static/qce/log-editor/") for name in names):
                   raise ValueError(f"{root}: found the old editor route")
-              if b'qce-log-tools' not in server or b'qce-html-log-progress-v1' not in server:
+              if any(marker not in server for marker in (b'qce-log-tools', b'qce-log-kept', b'qce-html-log-progress-v1')):
                   raise ValueError(f"{root}: the server is missing the integrated HTML viewer")
 
           with installer.open("rb") as executable:
@@ -946,7 +946,7 @@ jobs:
 
           用 QQ 扫码登录，在 QCE「会话」中选择聊天记录和时间范围，导出为 HTML。直接打开单文件 HTML，或解压流式 ZIP 后打开 `index.html`。
 
-          在同一页阅读记录、搜索、按成员／类型／日期筛选，并直接保留、排除或编辑消息。拖选连续消息可归入章节或回合。已确认的消息重新编辑后，保存会定位到下一条。
+          在同一页阅读记录、搜索、按成员／类型／日期筛选，并直接保留、排除或编辑消息。头像旁的浅灰色小勾表示已保留。拖选连续消息可归入章节或回合。已确认的消息重新编辑后，保存会定位到下一条。
 
           点「成稿」预览、编辑并导出 TXT、Markdown 或 HTML。进度自动保存在当前浏览器，也可在侧栏备份和恢复。
 

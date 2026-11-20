@@ -155,6 +155,21 @@ mark.hl {
 
 .qce-log-current { background: color-mix(in srgb, #66a5fb 15%, transparent); }
 .qce-log-selected { background: color-mix(in srgb, #66a5fb 27%, transparent); }
+.qce-log-avatar { position: relative; flex: none; }
+.qce-log-kept { color: #a0a0a0; font-size: .625rem; line-height: 1; }
+.qce-log-avatar .qce-log-kept {
+  position: absolute;
+  inset-inline-end: -.1875rem;
+  inset-block-end: 0;
+  display: grid;
+  place-items: center;
+  width: .75rem;
+  height: .75rem;
+  border-radius: 50%;
+  background: var(--background);
+}
+.message.self .qce-log-avatar .qce-log-kept { inset-inline-start: -.1875rem; inset-inline-end: auto; }
+.system-message-container > .qce-log-kept { margin-inline-end: .25rem; }
 .qce-log-message-meta, .qce-log-edited { max-width: 52rem; margin: 0 auto; padding: .1rem .8rem .45rem; }
 .qce-log-message-meta { color: var(--muted-foreground); font-size: .6875rem; }
 .qce-log-edited { white-space: pre-wrap; overflow-wrap: anywhere; font-size: .875rem; }
