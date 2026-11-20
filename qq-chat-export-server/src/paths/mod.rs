@@ -15,6 +15,8 @@ pub enum PathError {
 pub struct PathManager {
     custom_output_dir: RwLock<Option<PathBuf>>,
     custom_scheduled_export_dir: RwLock<Option<PathBuf>>,
+    #[cfg(test)]
+    base_override: Option<PathBuf>,
 }
 
 impl Default for PathManager {
@@ -30,6 +32,16 @@ impl PathManager {
         Self {
             custom_output_dir: RwLock::new(None),
             custom_scheduled_export_dir: RwLock::new(None),
+            #[cfg(test)]
+            base_override: None,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_base_dir(base_dir: PathBuf) -> Self {
+        Self {
+            base_override: Some(base_dir),
+            ..Self::new()
         }
     }
 
@@ -110,7 +122,27 @@ impl PathManager {
 
     /// 默认基目录：`~/.qq-chat-exporter`。
     pub fn default_base_dir(&self) -> PathBuf {
+        #[cfg(test)]
+        if let Some(base_dir) = &self.base_override {
+            return base_dir.clone();
+        }
         Self::user_home().join(".qq-chat-exporter")
+    }
+
+    /// Private temporary messages retained for failed streaming ZIP tasks.
+    pub(crate) fn export_checkpoint_path(&self, task_id: &str) -> Option<PathBuf> {
+        if !task_id.starts_with("streaming_zip_")
+            || !task_id
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+        {
+            return None;
+        }
+        Some(
+            self.default_base_dir()
+                .join("export-checkpoints")
+                .join(format!("{task_id}.jsonl")),
+        )
     }
 
     /// 默认导出根目录，与程序和内部数据库分开保存。

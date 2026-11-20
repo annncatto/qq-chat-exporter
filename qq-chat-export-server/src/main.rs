@@ -292,6 +292,10 @@ fn build_router(
         )
         .route("/api/tasks/:taskId/cancel", post(tasks::cancel_task))
         .route(
+            "/api/tasks/:taskId/resume",
+            post(messages::resume_streaming_zip),
+        )
+        .route(
             "/api/tasks/:taskId/original-files",
             delete(tasks::delete_original_files),
         )
@@ -610,7 +614,12 @@ async fn reconcile_and_load_tasks(db: &Arc<DatabaseManager>) -> HashMap<String, 
                 .and_then(Value::as_str)
                 .is_some_and(|e| !e.is_empty());
             merged.insert("status".to_string(), json!("failed"));
-            if !has_error {
+            if merged.contains_key("historyCheckpoint") {
+                merged.insert(
+                    "error".to_string(),
+                    json!("QCE 上次运行已中断，可以从已保存的位置继续"),
+                );
+            } else if !has_error {
                 merged.insert("error".to_string(), json!(ORPHAN_TASK_ERROR_MESSAGE));
             }
             normalize_orphan_roaming_scan(&mut merged);

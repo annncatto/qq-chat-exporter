@@ -115,6 +115,8 @@ function createFallbackTask(data: ProgressPayload): ExportTask {
     },
     sessionName: "导出任务",
     status: data.status,
+    attempt: data.attempt,
+    canResume: data.canResume,
     progress: data.progress ?? (data.status === "completed" ? 100 : 0),
     format: "",
     messageCount: data.messageCount,
@@ -489,6 +491,7 @@ export function useExportTasks(_props?: UseExportTasksProps) {
           taskId,
           progress: remoteTask?.progress ?? tasksRef.current.find((task) => task.id === taskId)?.progress ?? 0,
           status: "cancelled",
+          attempt: remoteTask?.attempt,
           message: remoteTask?.progressMessage || "任务已停止",
           completedAt: remoteTask?.completedAt,
         }
@@ -673,6 +676,7 @@ export function useExportTasks(_props?: UseExportTasksProps) {
     let updatedTask: ExportTask | undefined
     const knownTask = tasksRef.current.find((task) => task.id === data.taskId)
     const eagerlyUpdatedTask = knownTask ? mergeExportTaskUpdate(knownTask, data) : undefined
+    if (knownTask && eagerlyUpdatedTask === knownTask) return
     let pendingTask: ExportTask | undefined
     if (!knownTask) {
       const previousPending = pendingTaskUpdatesRef.current.get(data.taskId)
@@ -707,6 +711,24 @@ export function useExportTasks(_props?: UseExportTasksProps) {
     }
   }, [isTaskDeleted, refreshTasks, syncTaskToast])
 
+  const resumingTasksRef = useRef(new Set<string>())
+  const resumeTask = useCallback(async (taskId: string) => {
+    if (resumingTasksRef.current.has(taskId)) return
+    resumingTasksRef.current.add(taskId)
+    try {
+      const response = await apiCall(`/api/tasks/${encodeURIComponent(taskId)}/resume`, {
+        method: "POST",
+      }) as APIResponse<ExportTask>
+      if (!response.success || !response.data) {
+        throw new Error(response.error?.message || "继续导出失败")
+      }
+      const task = response.data
+      handleWebSocketProgress({ ...task, taskId, message: task.progressMessage ?? task.message })
+    } finally {
+      resumingTasksRef.current.delete(taskId)
+    }
+  }, [apiCall, handleWebSocketProgress])
+
   const handleTaskCancelled = useCallback((task: ExportTask) => {
     const taskId = task.id
     if (!taskId || isTaskDeleted(taskId)) return
@@ -714,6 +736,7 @@ export function useExportTasks(_props?: UseExportTasksProps) {
       taskId,
       progress: task.progress ?? 0,
       status: "cancelled",
+      attempt: task.attempt,
       message: task.progressMessage || "任务已停止",
       messageCount: task.messageCount,
       error: task.error,
@@ -875,6 +898,7 @@ export function useExportTasks(_props?: UseExportTasksProps) {
     refreshTasks,
     deleteTask,
     cancelTask,
+    resumeTask,
     createTask,
     updateTaskProgress,
     handleWebSocketProgress,

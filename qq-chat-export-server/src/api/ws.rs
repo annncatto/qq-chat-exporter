@@ -87,6 +87,14 @@ fn build_task_resync_payload(tasks: &[Value]) -> Vec<Value> {
                     .and_then(Value::as_i64)
                     .unwrap_or(0),
             });
+            if let Some(attempt) = task.get("attempt") {
+                view["attempt"] = attempt.clone();
+            }
+            if task.get("historyCheckpoint").is_some()
+                && task.get("status").and_then(Value::as_str) == Some("failed")
+            {
+                view["canResume"] = Value::Bool(true);
+            }
             if let Some(error) = task.get("error").and_then(Value::as_str) {
                 if !error.is_empty() {
                     if let Some(obj) = view.as_object_mut() {

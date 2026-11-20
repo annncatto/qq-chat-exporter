@@ -184,6 +184,8 @@ export interface ExportTask {
   }
   sessionName: string
   status: "queued" | "pending" | "running" | "completed" | "failed" | "cancelled"
+  attempt?: number
+  canResume?: boolean
   progress: number
   format: string
   startTime?: number
@@ -403,6 +405,8 @@ export interface WebSocketProgressMessage {
     taskId: string
     progress?: number
     status: "queued" | "pending" | "running" | "completed" | "failed" | "cancelled"
+    attempt?: number
+    canResume?: boolean
     error?: string
     fileName?: string
     filePath?: string
@@ -432,6 +436,8 @@ export interface WebSocketTaskResyncMessage {
     tasks: Array<{
       taskId: string
       status: string
+      attempt?: number
+      canResume?: boolean
       progress: number
       messageCount: number
       error?: string

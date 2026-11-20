@@ -472,6 +472,7 @@ export default function QCEDashboard({ initialTab }: { initialTab?: string } = {
     loadTasks,
     deleteTask,
     cancelTask,
+    resumeTask,
     createTask,
     downloadTask,
     getTaskStats,
@@ -2319,6 +2320,15 @@ export default function QCEDashboard({ initialTab }: { initialTab?: string } = {
                       </div>
 
                       <div className="ml-3 flex items-center gap-1.5 flex-shrink-0">
+                        {task.status === "failed" && task.canResume && (
+                          <Button size="sm" variant="outline" onClick={() => {
+                            void resumeTask(task.id).catch((error: unknown) => {
+                              addNotification("error", "继续导出失败", error instanceof Error ? error.message : "请稍后重试")
+                            })
+                          }}>
+                            继续导出
+                          </Button>
+                        )}
                         {/* issue #446：运行中的任务可以停止，打断分页抓取，不必干等。 */}
                         {isActiveExportTaskStatus(task.status) && (
                           <Button

@@ -209,6 +209,12 @@ pub enum FetchError {
     /// API 调用超时。
     #[error("API调用超时 ({0}ms)")]
     Timeout(u64),
+    /// QQ 已结束请求并返回历史查询超时。
+    #[error("原生消息查询失败 result=2004007: {0}")]
+    NativeQueryTimeout(String),
+    /// QQ 明确返回旧方向已无消息。
+    #[error("原生消息查询到达历史末尾")]
+    NativeHistoryEnd,
     /// 底层 API 错误。
     #[error("{0}")]
     Api(String),
@@ -375,6 +381,10 @@ impl BatchMessageFetcher {
     /// 当前使用的获取策略。
     pub async fn current_strategy(&self) -> FetchStrategy {
         self.state.lock().await.current_strategy
+    }
+
+    pub(crate) async fn current_batch_size(&self) -> i64 {
+        self.state.lock().await.batch_size
     }
 
     /// 抓取序列起点：重置取消标记（issue #446 —— 取消标记只在序列起点重置，
@@ -758,21 +768,33 @@ impl BatchMessageFetcher {
         let page = requested_page.load(Ordering::SeqCst).max(1);
         // issue #716：原生错误（GeneralCallResult.result != 0）与无效响应必须
         // 显式失败，不能再像空页一样按页宽跳过而静默丢消息。
-        let mut messages = extract_msg_page_strict(&result).map_err(FetchError::Api)?;
+        let mut messages = match extract_msg_page_strict(&result) {
+            Ok(messages) => messages,
+            Err(FetchError::NativeHistoryEnd) if anchor.is_none() || start_seq.is_some() => {
+                return Ok(BatchFetchResult::default());
+            }
+            Err(error) => return Err(error),
+        };
 
         // issue #716：满页时页尾边界 msgSeq 可能只返回了部分记录（count 限制
         // 的是记录条数，同一 msgSeq 可混有系统提示与普通消息）。先做包含式
         // 补读，再允许锚点推进到 min(msgSeq) - 1。
         let mut backfilled_boundary = None;
+        let mut history_ended = false;
         if messages.len() as i64 >= page {
             if let Some(backfill) = self.backfill_seq_boundary(peer, &messages).await? {
                 messages.extend(backfill.messages);
                 backfilled_boundary = Some(backfill.boundary_seq);
+                history_ended = backfill.history_ended;
             }
         }
 
         let mut batch =
             process_seq_page_messages(messages, filter, anchor, page, backfilled_boundary);
+        if history_ended {
+            batch.has_more = false;
+            batch.next_seq = None;
+        }
         batch.messages = apply_client_side_filter(batch.messages, filter);
         batch.actual_count = batch.messages.len();
         Ok(batch)
@@ -946,6 +968,9 @@ impl BatchMessageFetcher {
             .await;
             drop(gate_permit);
             let result = match call_result {
+                Ok(Ok(value)) if native_result_code(&value) == Some(2_004_007) => {
+                    FetchError::NativeQueryTimeout(native_error_detail(&value).to_string())
+                }
                 Ok(Ok(value)) => {
                     tracing::info!("[BatchMessageFetcher] API调用成功");
                     let mut state = self.state.lock().await;
@@ -989,7 +1014,8 @@ impl BatchMessageFetcher {
                     return Err(result);
                 }
                 bridge_recoveries += 1;
-                self.shrink_batch_size().await;
+                self.shrink_batch_size(i64::MAX, MIN_BATCH_SIZE_ON_TIMEOUT)
+                    .await;
                 tracing::warn!(
                     "[BatchMessageFetcher] bridge 不可用（Worker 可能崩溃/重启），等待恢复后继续 (第 {bridge_recoveries}/{MAX_BRIDGE_RECOVERIES} 次)"
                 );
@@ -1003,12 +1029,18 @@ impl BatchMessageFetcher {
                 return Err(result);
             }
             attempt += 1;
+            if matches!(&result, FetchError::NativeQueryTimeout(_)) {
+                // 原生请求已经结束。按实际群聊页上限减半，避免配置 3000 缩为 1500
+                // 时仍然向 QQ 重复请求 500 条。
+                self.shrink_batch_size(GROUP_SEQ_PAGE_MAX, 1).await;
+            }
 
             // issue #305 / #316：超时类错误下次重试用更小的 batchSize。
             // issue #634：本地超时不代表 Worker 内旧查询已结束，先冷却再等
             // bridge 健康，避免重量级查询在 Worker 内叠加。
             if result.is_timeout() {
-                self.shrink_batch_size().await;
+                self.shrink_batch_size(i64::MAX, MIN_BATCH_SIZE_ON_TIMEOUT)
+                    .await;
                 let cooldown =
                     TIMEOUT_COOLDOWN_MS.max(self.config.retry_interval_ms * u64::from(attempt));
                 tracing::info!("[BatchMessageFetcher] 超时冷却 {cooldown}ms 后重试");
@@ -1024,15 +1056,15 @@ impl BatchMessageFetcher {
         }
     }
 
-    /// 超时 / 崩溃后自适应缩小 batchSize（不低于 [`MIN_BATCH_SIZE_ON_TIMEOUT`]）。
-    async fn shrink_batch_size(&self) {
+    /// 超时后按实际请求上限降低 batchSize，保留原先更小的手动配置。
+    async fn shrink_batch_size(&self, request_size_limit: i64, min_batch_size: i64) {
         let mut state = self.state.lock().await;
         state.consecutive_successes = 0;
-        if state.batch_size > MIN_BATCH_SIZE_ON_TIMEOUT {
+        let reduced = (state.batch_size.min(request_size_limit) / 2).max(min_batch_size);
+        if reduced < state.batch_size {
             let previous = state.batch_size;
-            let next = (previous / 2).max(MIN_BATCH_SIZE_ON_TIMEOUT);
-            state.batch_size = next;
-            tracing::warn!("[BatchMessageFetcher] 自适应缩小 batchSize: {previous} -> {next}");
+            state.batch_size = reduced;
+            tracing::warn!("[BatchMessageFetcher] 自适应缩小 batchSize: {previous} -> {reduced}");
         }
     }
 
@@ -1108,7 +1140,7 @@ impl BatchMessageFetcher {
                 }
             })
             .await?;
-        let messages = extract_msg_page_strict(&value).map_err(FetchError::Api)?;
+        let messages = extract_msg_page_strict(&value)?;
         Ok((messages, used.load(Ordering::SeqCst).max(1)))
     }
 
@@ -1150,31 +1182,40 @@ impl BatchMessageFetcher {
         // 第一步：包含式重读边界序号。重读结果里出现更小的 msgSeq，或未取满，
         // 都说明边界 seq 的记录已全部返回。
         requests += 1;
-        let (reread, used) = self
+        let seq_reported_end = match self
             .seq_backfill_fetch(peer, SeqBackfillQuery::Seq(boundary_seq))
-            .await?;
-        let passed_boundary = collect_boundary_messages(
-            &reread,
-            boundary_seq,
-            &mut seen,
-            &mut boundary_msgs,
-            &mut recovered,
-        );
-        if passed_boundary || (reread.len() as i64) < used {
-            tracing::info!(
-                "[BatchMessageFetcher] issue #716：边界 msgSeq={boundary_seq} 补读完成，补入 {} 条",
-                recovered.len()
-            );
-            return Ok(Some(SeqBoundaryBackfill {
-                boundary_seq,
-                messages: recovered,
-            }));
-        }
+            .await
+        {
+            Ok((reread, used)) => {
+                let passed_boundary = collect_boundary_messages(
+                    &reread,
+                    boundary_seq,
+                    &mut seen,
+                    &mut boundary_msgs,
+                    &mut recovered,
+                );
+                if passed_boundary || (reread.len() as i64) < used {
+                    tracing::info!(
+                        "[BatchMessageFetcher] issue #716：边界 msgSeq={boundary_seq} 补读完成，补入 {} 条",
+                        recovered.len()
+                    );
+                    return Ok(Some(SeqBoundaryBackfill {
+                        boundary_seq,
+                        messages: recovered,
+                        history_ended: false,
+                    }));
+                }
+                false
+            }
+            // 此处边界消息在手，单次 seq 补读返回末尾仍需用已知 msgId 确认。
+            Err(FetchError::NativeHistoryEnd) => true,
+            Err(error) => return Err(error),
+        };
 
         // 第二步：边界 seq 本身超过一个窗口（重读页全是边界 seq 记录）。
         // 不能只重复请求同一个 seq 锚点（会原地打转），改用最旧边界记录的
         // msgId 向旧方向翻页，直到越过该 seq 或到达尾部。
-        loop {
+        let history_ended = loop {
             if requests >= SEQ_BOUNDARY_BACKFILL_MAX_REQUESTS {
                 return Err(FetchError::SequenceBackfillExhausted {
                     msg_seq: boundary_seq,
@@ -1193,9 +1234,14 @@ impl BatchMessageFetcher {
             tracing::info!(
                 "[BatchMessageFetcher] issue #716：边界 msgSeq={boundary_seq} 占满整页，按 msgId={cursor_id} 向旧方向补读 (第 {requests}/{SEQ_BOUNDARY_BACKFILL_MAX_REQUESTS} 次)"
             );
-            let (history, _used) = self
+            let (history, used) = match self
                 .seq_backfill_fetch(peer, SeqBackfillQuery::MsgId(cursor_id.as_str()))
-                .await?;
+                .await
+            {
+                Ok(page) => page,
+                Err(FetchError::NativeHistoryEnd) => break true,
+                Err(error) => return Err(error),
+            };
             let passed = collect_boundary_messages(
                 &history,
                 boundary_seq,
@@ -1204,8 +1250,19 @@ impl BatchMessageFetcher {
                 &mut recovered,
             );
             // 越过边界 seq 或到达空页（历史尾部）⇒ 边界已补齐。
-            if passed || history.is_empty() {
-                break;
+            if passed {
+                break false;
+            }
+            if history.is_empty() {
+                break seq_reported_end;
+            }
+            if seq_reported_end
+                && (history.len() as i64) < used
+                && history
+                    .iter()
+                    .any(|msg| message_msg_id(msg).as_deref() == Some(cursor_id.as_str()))
+            {
+                break true;
             }
             // 游标必须前进：最旧边界记录的 msgId 发生变化，否则会原地打转，
             // 必须显式失败而不是无限重试或静默跳过。
@@ -1219,7 +1276,7 @@ impl BatchMessageFetcher {
                     "边界 msgSeq={boundary_seq} 补读游标未前进（msgId={cursor_id}），拒绝继续跳过"
                 )));
             }
-        }
+        };
 
         tracing::info!(
             "[BatchMessageFetcher] issue #716：边界 msgSeq={boundary_seq} msgId 游标补读完成，累计补入 {} 条",
@@ -1228,6 +1285,7 @@ impl BatchMessageFetcher {
         Ok(Some(SeqBoundaryBackfill {
             boundary_seq,
             messages: recovered,
+            history_ended,
         }))
     }
 }
@@ -1279,6 +1337,21 @@ struct SeqBoundaryBackfill {
     boundary_seq: i64,
     /// 补入的消息（全部 msgSeq == boundary_seq 且 msgId 未见过）。
     messages: Vec<Value>,
+    history_ended: bool,
+}
+
+fn native_result_code(api_result: &Value) -> Option<i64> {
+    let result = api_result.get("result")?;
+    result
+        .as_i64()
+        .or_else(|| result.as_str()?.trim().parse().ok())
+}
+
+fn native_error_detail(api_result: &Value) -> &str {
+    api_result
+        .get("errMsg")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown")
 }
 
 /// 从序列分页响应中提取消息列表，并拒绝把原生错误 / 无效响应当成空页。
@@ -1286,29 +1359,37 @@ struct SeqBoundaryBackfill {
 /// NapCat 原生调用返回 `GeneralCallResult { result: 0 | -1, errMsg }`，
 /// 业务错误不抛异常而是 `result = -1`；`msgList` 可能在顶层或包一层
 /// `result` 对象内（与 `extract_msg_list` 的两种形状一致）。
-fn extract_msg_page_strict(api_result: &Value) -> Result<Vec<Value>, String> {
-    if let Some(code) = api_result.get("result").and_then(Value::as_i64) {
-        if code != 0 {
-            let detail = api_result
-                .get("errMsg")
-                .and_then(Value::as_str)
-                .unwrap_or("unknown");
-            return Err(format!("原生消息查询失败 result={code}: {detail}"));
-        }
-    }
+fn extract_msg_page_strict(api_result: &Value) -> Result<Vec<Value>, FetchError> {
     let candidates = [
         api_result.get("msgList"),
         api_result.get("result").and_then(|r| r.get("msgList")),
         api_result.get("messages"),
         api_result.get("result").and_then(|r| r.get("messages")),
     ];
+    if let Some(code) = native_result_code(api_result) {
+        if code != 0 {
+            let detail = native_error_detail(api_result);
+            if code == 2_004_000
+                && detail.trim().eq_ignore_ascii_case("no any more msg!")
+                && candidates
+                    .iter()
+                    .flatten()
+                    .all(|value| value.is_null() || value.as_array().is_some_and(Vec::is_empty))
+            {
+                return Err(FetchError::NativeHistoryEnd);
+            }
+            return Err(FetchError::Api(format!(
+                "原生消息查询失败 result={code}: {detail}"
+            )));
+        }
+    }
     let Some(candidate) = candidates.into_iter().flatten().next() else {
-        return Err("响应缺少 msgList".to_string());
+        return Err(FetchError::Api("响应缺少 msgList".to_string()));
     };
     match candidate {
         Value::Array(items) => Ok(items.clone()),
         Value::Null => Ok(Vec::new()),
-        _ => Err("msgList 字段不是数组".to_string()),
+        _ => Err(FetchError::Api("msgList 字段不是数组".to_string())),
     }
 }
 
@@ -1679,6 +1760,36 @@ mod tests {
         ) -> Result<Value, String> {
             Ok(json!({ "msgList": [] }))
         }
+    }
+
+    #[tokio::test]
+    async fn native_retry_shrinks_the_actual_request_size() {
+        let fetcher = BatchMessageFetcher::new(
+            Arc::new(NoopApi),
+            BatchFetchConfig {
+                batch_size: 3000,
+                retry_interval_ms: 0,
+                ..BatchFetchConfig::default()
+            },
+        );
+        let pages = std::sync::Mutex::new(Vec::new());
+        let result = fetcher
+            .call_with_retry(|batch_size| {
+                let pages = &pages;
+                async move {
+                    let mut pages = pages.lock().unwrap();
+                    pages.push(seq_page_size(batch_size));
+                    if pages.len() <= 3 {
+                        Ok(json!({ "result": 2_004_007, "errMsg": "reach max retry time limit!" }))
+                    } else {
+                        Ok(json!({ "result": 0, "msgList": [] }))
+                    }
+                }
+            })
+            .await
+            .expect("a smaller native page succeeds");
+        assert_eq!(pages.into_inner().unwrap(), [500, 250, 125, 62]);
+        assert_eq!(result["result"], 0);
     }
 
     #[tokio::test]
@@ -2565,8 +2676,64 @@ mod tests {
         expect_backfill_error(Err("recv failed with error: 10054".to_string())).await;
         // 原生 GeneralCallResult.result = -1（NapCat 不抛异常）。
         expect_backfill_error(Ok(json!({ "result": -1, "errMsg": "native boom" }))).await;
+        // 相同 QQ code 但无明确末尾语义，或仍携带消息，也不得悄悄结束。
+        expect_backfill_error(Ok(json!({ "result": 2_004_000, "errMsg": "cannot query" }))).await;
+        expect_backfill_error(Ok(json!({
+            "result": 2_004_000, "errMsg": "no any more msg!", "msgList": [{"msgId": "present"}]
+        })))
+        .await;
         // 无效响应（缺少 msgList）。
         expect_backfill_error(Ok(json!({ "unexpected": true }))).await;
+    }
+
+    #[tokio::test]
+    async fn seq_boundary_native_end_uses_msg_id_and_keeps_older_pages() {
+        let mut entries: Vec<_> = (0..12_i64)
+            .map(|i| (format!("s500-{i:03}"), 500, 500_000 + i * 1000))
+            .collect();
+        entries.push(("s499".to_string(), 499, 499_000));
+        let api = Arc::new(SeqBoundaryMock::new(entries));
+        api.script_seq(Ok(
+            json!({ "result": 2_004_000, "errMsg": "no any more msg!" }),
+        ));
+        let fetcher = BatchMessageFetcher::new(
+            Arc::clone(&api) as Arc<dyn MessageFetchApi>,
+            boundary_fetcher_config(),
+        );
+        let ids = collect_all_ids(&fetcher, &group_peer(), &MessageFilter::default()).await;
+        assert_eq!(ids.len(), 13);
+        assert!(ids.contains(&"s499".to_string()));
+        assert!(api
+            .call_log()
+            .iter()
+            .any(|item| item.starts_with("history:")));
+    }
+
+    #[tokio::test]
+    async fn seq_boundary_native_end_and_short_msg_id_page_confirm_history_end() {
+        let api = Arc::new(SeqBoundaryMock::new(
+            (496..=500)
+                .map(|seq| (format!("s{seq}"), seq, seq * 1000))
+                .collect(),
+        ));
+        api.script_seq(Ok(
+            json!({ "result": "2004000", "errMsg": "no any more msg!" }),
+        ));
+        let fetcher = BatchMessageFetcher::new(
+            Arc::clone(&api) as Arc<dyn MessageFetchApi>,
+            boundary_fetcher_config(),
+        );
+        let batch = fetcher
+            .fetch_next_batch(&group_peer(), &MessageFilter::default(), None)
+            .await
+            .expect("read the last page")
+            .expect("last page contains messages");
+        assert_eq!(batch.messages.len(), 5);
+        assert!(!batch.has_more);
+        assert!(api
+            .call_log()
+            .iter()
+            .any(|item| item.starts_with("history:s496:")));
     }
 
     /// issue #716：补读请求数超过上限必须显式失败（SEQUENCE_BOUNDARY_BACKFILL_EXHAUSTED）。

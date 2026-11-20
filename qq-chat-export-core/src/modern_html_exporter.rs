@@ -26,6 +26,7 @@ use tokio::task::JoinSet;
 const METADATA_PADDING: usize = 24;
 /// 回填元数据时只扫描文件头部这么多字节。
 const METADATA_SCAN_BYTES: usize = 64 * 1024;
+const MAX_FORWARD_RENDER_DEPTH: usize = 3;
 
 /// HTML 导出选项。
 #[derive(Debug, Clone)]
@@ -2047,42 +2048,67 @@ fn iter_resources(message: &CleanMessage) -> Vec<ResourceTask> {
 
     // elements 中的资源元素
     for el in &message.content.elements {
-        let data = &el.data;
-        if !data.is_object() {
-            continue;
-        }
-        let el_type = if el.element_type.is_empty() {
-            "file".to_owned()
+        let kind = if el.element_type.is_empty() {
+            "file"
         } else {
-            el.element_type.clone()
+            el.element_type.as_str()
         };
+        collect_element_resources(&mut tasks, kind, &el.data, 0);
+    }
+    tasks
+}
 
-        // 优先使用有效的 localPath
-        let local_path = str_field(data, "localPath").unwrap_or_default();
-        if !local_path.is_empty() && is_valid_resource_path(&local_path) {
-            tasks.push(ResourceTask {
-                resource_type: el_type,
-                file_name: base_name_of(&local_path),
-                local_path,
-            });
-            continue;
-        }
-        // 如果没有有效的 localPath，但有 filename/md5，也尝试处理（用于流式导出）
-        let filename = str_field(data, "filename").filter(|s| !s.is_empty());
-        let md5 = str_field(data, "md5").filter(|s| !s.is_empty());
-        if filename.is_some() || md5.is_some() {
-            let file_name = filename.or_else(|| md5.map(|m| format!("{m}.jpg")));
-            if let Some(file_name) = file_name {
-                tasks.push(ResourceTask {
-                    resource_type: el_type,
-                    file_name,
-                    // 空路径，copy_resource_file 会从 ResourceHandler 目录查找
-                    local_path: String::new(),
-                });
+fn collect_element_resources(
+    tasks: &mut Vec<ResourceTask>,
+    kind: &str,
+    data: &Value,
+    depth: usize,
+) {
+    if kind == "forward" && depth <= MAX_FORWARD_RENDER_DEPTH {
+        for message in data
+            .get("messages")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            for element in message
+                .pointer("/content/elements")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+            {
+                let Some(kind) = element.get("type").and_then(Value::as_str) else {
+                    continue;
+                };
+                if matches!(kind, "image" | "video" | "audio" | "file" | "forward") {
+                    collect_element_resources(tasks, kind, &element["data"], depth + 1);
+                }
             }
         }
     }
-    tasks
+    let local_path = str_field(data, "localPath").unwrap_or_default();
+    if is_valid_resource_path(&local_path) {
+        tasks.push(ResourceTask {
+            resource_type: kind.to_owned(),
+            file_name: base_name_of(&local_path),
+            local_path,
+        });
+        return;
+    }
+    let file_name = str_field(data, "filename")
+        .filter(|s| !s.is_empty())
+        .or_else(|| {
+            str_field(data, "md5")
+                .filter(|s| !s.is_empty())
+                .map(|md5| format!("{md5}.jpg"))
+        });
+    if let Some(file_name) = file_name {
+        tasks.push(ResourceTask {
+            resource_type: kind.to_owned(),
+            file_name,
+            local_path: String::new(),
+        });
+    }
 }
 
 /// 流式复制单个资源到导出目录。
@@ -2155,24 +2181,15 @@ async fn resolve_resource_source_path(resource: &ResourceTask) -> Option<PathBuf
     None
 }
 
-/// ResourceHandler 资源根目录：`%USERPROFILE%/.qq-chat-exporter/resources`，
-/// 无 `USERPROFILE` 时回退到进程工作目录。
+/// ResourceHandler 缓存目录，与服务端 PathManager 使用相同的用户目录优先级。
 fn resource_handler_root() -> PathBuf {
-    let base = std::env::var_os("USERPROFILE").map_or_else(
-        || std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
-        PathBuf::from,
-    );
-    base.join(".qq-chat-exporter").join("resources")
-}
-
-/// 跨平台 HOME 目录。
-fn home_dir() -> PathBuf {
-    std::env::var_os("HOME")
-        .or_else(|| std::env::var_os("USERPROFILE"))
+    let base = std::env::var_os("USERPROFILE")
+        .or_else(|| std::env::var_os("HOME"))
         .map_or_else(
             || std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
             PathBuf::from,
-        )
+        );
+    base.join(".qq-chat-exporter").join("resources")
 }
 
 /// 解析资源路径为绝对路径。
@@ -2182,8 +2199,7 @@ fn resolve_resource_path(resource_path: &str) -> PathBuf {
     if p.is_absolute() {
         return p.to_path_buf();
     }
-    // 资源根目录：跨平台 HOME 目录
-    let resource_root = home_dir().join(".qq-chat-exporter").join("resources");
+    let resource_root = resource_handler_root();
     // 处理 images/xxx.jpg 格式的相对路径
     for type_prefix in ["images/", "videos/", "audios/", "files/"] {
         if resource_path.starts_with(type_prefix) {
@@ -2801,7 +2817,6 @@ fn render_forward_element(exporter: &ModernHtmlExporter, data: &Value, depth: us
         });
     // issue #434：子消息本身可能又是一条合并转发（嵌套[聊天记录]），递归展开成
     // 内层卡片。解析器侧 MAX_FORWARD_DEPTH=3，这里用同样的上限回退异常数据。
-    const MAX_RENDER_DEPTH: usize = 3;
     const INITIAL_FORWARD_LINES: usize = 4;
 
     let mut preview_html = String::new();
@@ -2862,7 +2877,9 @@ fn render_forward_element(exporter: &ModernHtmlExporter, data: &Value, depth: us
                         .filter_map(|element| {
                             let data = element.get("data").unwrap_or(&Value::Null);
                             match element.get("type").and_then(Value::as_str) {
-                                Some("forward") if depth < MAX_RENDER_DEPTH && !data.is_null() => {
+                                Some("forward")
+                                    if depth < MAX_FORWARD_RENDER_DEPTH && !data.is_null() =>
+                                {
                                     Some(render_forward_element(exporter, data, depth + 1))
                                 }
                                 Some("image") => Some(exporter.render_image_element(data)),

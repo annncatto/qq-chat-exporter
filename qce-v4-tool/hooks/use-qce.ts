@@ -76,6 +76,7 @@ export function useQCE(props?: { onNotification?: UseExportTasksProps['onNotific
     loadTasks: exportTasks.loadTasks,
     deleteTask: exportTasks.deleteTask,
     cancelTask: exportTasks.cancelTask,
+    resumeTask: exportTasks.resumeTask,
     createTask: exportTasks.createTask,
     downloadTask: exportTasks.downloadTask,
     deleteOriginalFiles: exportTasks.deleteOriginalFiles,

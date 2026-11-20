@@ -72,6 +72,43 @@ fn sender(uid: &str, name: &str) -> Sender {
     }
 }
 
+#[tokio::test]
+async fn chunked_html_packages_images_in_nested_forwarded_messages() {
+    let dir = TestDir::new("forward-resources");
+    let image = dir.join("source/forwarded.png");
+    fs::create_dir_all(image.parent().unwrap()).unwrap();
+    fs::write(&image, b"forwarded image fixture").unwrap();
+    let nested = json!({ "type": "forward", "data": { "messages": [{
+        "content": { "elements": [{ "type": "image", "data": {
+            "filename": "forwarded.png", "localPath": image
+        }}] }
+    }] }});
+    let messages = [message(
+        "1",
+        1_719_000_000_000,
+        vec![MessageElement {
+            element_type: "forward".to_string(),
+            data: json!({ "messages": [{ "content": { "elements": [nested] } }] }),
+        }],
+    )];
+    let mut exporter = ModernHtmlExporter::new(HtmlExportOptions {
+        output_path: dir.join("output/index.html"),
+        ..HtmlExportOptions::default()
+    });
+    exporter
+        .export_chunked(
+            &messages,
+            &chat_info(),
+            &ChunkedHtmlExportOptions::default(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        fs::read(dir.join("output/resources/images/forwarded.png")).unwrap(),
+        b"forwarded image fixture"
+    );
+}
+
 fn message(id: &str, timestamp: i64, elements: Vec<MessageElement>) -> CleanMessage {
     CleanMessage {
         id: id.to_owned(),

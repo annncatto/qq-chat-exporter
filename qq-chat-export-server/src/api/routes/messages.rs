@@ -1,4 +1,8 @@
+mod checkpoint;
 mod roaming_export;
+
+pub use checkpoint::resume_streaming_zip;
+use checkpoint::{current_account_uid, HistoryCheckpoint};
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path as FsPath, PathBuf};
@@ -10,6 +14,7 @@ use axum::response::Response;
 use chrono::{Local, NaiveDate};
 use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
 use serde_json::{json, Value};
+use tokio::io::{AsyncSeekExt as _, AsyncWriteExt as _};
 
 use qce_exporter::excel_exporter::{ExcelExporter, ExcelFormatOptions};
 use qce_exporter::json_exporter::{
@@ -493,10 +498,15 @@ fn task_roaming_scan(task: &Value) -> Option<&Value> {
     task.get("roamingScan")
 }
 
-fn export_ws_event(event_type: &str, mut data: Value, roaming_scan: Option<&Value>) -> Value {
-    if let Some(roaming_scan) = roaming_scan {
-        data["taskKind"] = Value::String("roaming_export".to_string());
-        data["roamingScan"] = roaming_scan.clone();
+fn export_ws_event(event_type: &str, mut data: Value, task: Option<&Value>) -> Value {
+    if let Some(task) = task {
+        if let Some(roaming_scan) = task_roaming_scan(task) {
+            data["taskKind"] = Value::String("roaming_export".to_string());
+            data["roamingScan"] = roaming_scan.clone();
+        }
+        if let Some(attempt) = task.get("attempt") {
+            data["attempt"] = attempt.clone();
+        }
     }
     json!({
         "type": event_type,
@@ -512,7 +522,7 @@ fn broadcast_progress(
     progress: i64,
     message: &str,
     count: usize,
-    roaming_scan: Option<&Value>,
+    task: &Value,
 ) {
     state.broadcast_ws(&export_ws_event(
         "export_progress",
@@ -523,7 +533,7 @@ fn broadcast_progress(
             "message": message,
             "messageCount": count,
         }),
-        roaming_scan,
+        Some(task),
     ));
 }
 
@@ -554,15 +564,7 @@ async fn update_and_broadcast_progress(
         .get("status")
         .and_then(Value::as_str)
         .unwrap_or("running");
-    broadcast_progress(
-        state,
-        task_id,
-        status,
-        progress,
-        message,
-        count,
-        task_roaming_scan(&updated),
-    );
+    broadcast_progress(state, task_id, status, progress, message, count, &updated);
     true
 }
 
@@ -583,15 +585,7 @@ fn try_broadcast_live_progress(
         return false;
     };
     publish_live_task_progress(tasks.get(task_id), |task| {
-        broadcast_progress(
-            state,
-            task_id,
-            "running",
-            progress,
-            message,
-            count,
-            task_roaming_scan(task),
-        );
+        broadcast_progress(state, task_id, "running", progress, message, count, task);
     })
 }
 
@@ -1249,16 +1243,7 @@ async fn register_task(state: &SharedState, task: &Value) -> bool {
         .unwrap_or_default()
         .to_string();
     let mut tasks = state.export_tasks.lock().await;
-    let active_count = tasks
-        .values()
-        .filter(|value| {
-            matches!(
-                value.get("status").and_then(Value::as_str),
-                Some("queued" | "pending" | "running")
-            )
-        })
-        .count();
-    if active_count >= MAX_QUEUED_TASKS {
+    if !has_export_queue_capacity(&tasks) {
         return false;
     }
     tasks.insert(task_id, task.clone());
@@ -1266,6 +1251,19 @@ async fn register_task(state: &SharedState, task: &Value) -> bool {
         tracing::warn!("[ApiServer] 保存新任务到数据库失败: {error}");
     }
     true
+}
+
+fn has_export_queue_capacity(tasks: &HashMap<String, Value>) -> bool {
+    tasks
+        .values()
+        .filter(|value| {
+            matches!(
+                value.get("status").and_then(Value::as_str),
+                Some("queued" | "pending" | "running")
+            )
+        })
+        .count()
+        < MAX_QUEUED_TASKS
 }
 
 /// `POST /api/messages/export` — 创建异步导出任务。
@@ -1752,6 +1750,7 @@ enum ExportMode {
 
 enum ExportInput {
     Standard,
+    Resume(HistoryCheckpoint),
     Roaming { config: RoamingExportConfig },
 }
 
@@ -1771,7 +1770,7 @@ async fn wait_for_export_input_history_permit(
     cancel_flag: &AtomicBool,
     input: &ExportInput,
 ) -> Result<Option<tokio::sync::SemaphorePermit<'static>>, String> {
-    if matches!(input, ExportInput::Standard) {
+    if !matches!(input, ExportInput::Roaming { .. }) {
         return Ok(None);
     }
 
@@ -1814,25 +1813,24 @@ async fn run_export_task(
     // issue #446：注册取消 flag，使「停止任务」接口能打断本任务。
     let cancel_flag = register_export_cancel_flag(&state, &task_id).await;
     let cancelled_before_registration = cancel_flag.load(Ordering::SeqCst);
+    let mut saved_checkpoint = None;
 
     // 收敛所有执行分支的结果：末尾统一释放路径、下发终态、清理跟踪状态。
     // 排队前 / 排队中 / 执行中的「取消」统一交给末尾的 is_cancelled 判定。
     let result: Result<(), String> = if cancelled_before_registration {
         Err("任务已被用户停止".to_string())
     } else {
-        let _ = update_and_broadcast_progress(
-            &state,
-            &task_id,
-            json!({
-                "status": "queued",
-                "progress": 0,
-                "message": "正在排队中..."
-            }),
-            0,
-            "正在排队中...",
-            0,
-        )
-        .await;
+        if !matches!(&input, ExportInput::Resume(_)) {
+            let _ = update_and_broadcast_progress(
+                &state,
+                &task_id,
+                json!({ "status": "queued", "progress": 0, "message": "正在排队中..." }),
+                0,
+                "正在排队中...",
+                0,
+            )
+            .await;
+        }
 
         // 排队：异步获取并发名额，permit 生命周期覆盖整个导出过程。
         // 取消信号同时打断等待，避免已取消任务继续占用漫游独占许可。
@@ -1855,6 +1853,7 @@ async fn run_export_task(
                     mode,
                     &cancel_flag,
                     input,
+                    &mut saved_checkpoint,
                 )
                 .await
             }
@@ -1865,7 +1864,13 @@ async fn run_export_task(
     release_export_path(&req.output_dir.join(&file_name));
 
     if let Err(error) = result {
-        if is_cancelled(&state, &task_id, &cancel_flag).await {
+        let cancelled = is_cancelled(&state, &task_id, &cancel_flag).await;
+        if cancelled || saved_checkpoint.is_none() {
+            if let Some(path) = state.path_manager.export_checkpoint_path(&task_id) {
+                remove_checkpoint_file(&path).await;
+            }
+        }
+        if cancelled {
             tracing::info!("[ApiServer] 导出任务已被用户停止: {task_id}");
             let fallback_scan = {
                 let tasks = state.export_tasks.lock().await;
@@ -1877,6 +1882,7 @@ async fn run_export_task(
                 "status": "cancelled",
                 "message": "任务已停止",
                 "completedAt": now_iso(),
+                "historyCheckpoint": null,
             });
             if let Some(scan) = fallback_scan {
                 patch["roamingScan"] = scan;
@@ -1885,7 +1891,7 @@ async fn run_export_task(
                 state.broadcast_ws(&export_ws_event(
                     "export_progress",
                     json!({ "taskId": task_id, "status": "cancelled", "message": "任务已停止" }),
-                    task_roaming_scan(&updated_task),
+                    Some(&updated_task),
                 ));
             }
         } else {
@@ -1910,6 +1916,7 @@ async fn run_export_task(
                 "errorCode": error_code,
                 "errorHttpStatus": error_http_status,
                 "completedAt": now_iso(),
+                "historyCheckpoint": saved_checkpoint,
             });
             if let Some(scan) = fallback_scan {
                 patch["roamingScan"] = scan;
@@ -1923,9 +1930,12 @@ async fn run_export_task(
                         "error": error,
                         "errorCode": error_code,
                         "errorHttpStatus": error_http_status,
+                        "canResume": updated_task.get("historyCheckpoint").is_some(),
                     }),
-                    task_roaming_scan(&updated_task),
+                    Some(&updated_task),
                 ));
+            } else if let Some(path) = state.path_manager.export_checkpoint_path(&task_id) {
+                remove_checkpoint_file(&path).await;
             }
         }
     }
@@ -2169,11 +2179,12 @@ async fn create_zip_from_dir(dir: PathBuf, zip_path: PathBuf) -> Result<(), Stri
 const RAW_SPOOL_CHUNK_SIZE: usize = 20_000;
 
 /// issue #634：抓取阶段的磁盘 spool。原始消息逐批落盘为 JSONL，避免在内存
-/// 中累积超大群聊的全部原始消息；任何退出路径（Drop）都会清理文件。
+/// 中累积超大群聊的全部原始消息；只有已同步到磁盘的续跑断点会保留。
 struct RawMessageSpool {
     path: PathBuf,
     writer: Option<tokio::io::BufWriter<tokio::fs::File>>,
     count: usize,
+    keep_on_drop: bool,
 }
 
 impl RawMessageSpool {
@@ -2185,11 +2196,50 @@ impl RawMessageSpool {
             path,
             writer: Some(tokio::io::BufWriter::new(file)),
             count: 0,
+            keep_on_drop: false,
         })
     }
 
+    async fn reopen(path: PathBuf, checkpoint: &HistoryCheckpoint) -> Result<Self, String> {
+        let mut file = tokio::fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .await
+            .map_err(|e| format!("打开消息续跑文件失败: {e}"))?;
+        let length = file.metadata().await.map_err(|e| e.to_string())?.len();
+        if length < checkpoint.byte_len {
+            return Err("消息续跑文件不完整".to_string());
+        }
+        if length > checkpoint.byte_len {
+            // 上次续跑可能在保存新断点前退出。截掉未提交的记录，从旧游标重读。
+            file.set_len(checkpoint.byte_len)
+                .await
+                .map_err(|e| e.to_string())?;
+        }
+        file.seek(std::io::SeekFrom::Start(checkpoint.byte_len))
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(Self {
+            path,
+            writer: Some(tokio::io::BufWriter::new(file)),
+            count: checkpoint.message_count,
+            keep_on_drop: false,
+        })
+    }
+
+    async fn preserve(&mut self) -> std::io::Result<u64> {
+        let writer = self
+            .writer
+            .as_mut()
+            .ok_or_else(|| std::io::Error::other("消息暂存文件已关闭"))?;
+        writer.flush().await?;
+        writer.get_ref().sync_all().await?;
+        let length = writer.get_ref().metadata().await?.len();
+        self.keep_on_drop = true;
+        Ok(length)
+    }
+
     async fn append(&mut self, messages: &[Value]) -> Result<(), String> {
-        use tokio::io::AsyncWriteExt as _;
         let writer = self
             .writer
             .as_mut()
@@ -2210,7 +2260,6 @@ impl RawMessageSpool {
     }
 
     async fn finish(&mut self) -> Result<(), String> {
-        use tokio::io::AsyncWriteExt as _;
         if let Some(mut writer) = self.writer.take() {
             writer
                 .flush()
@@ -2232,7 +2281,17 @@ impl RawMessageSpool {
 impl Drop for RawMessageSpool {
     fn drop(&mut self) {
         self.writer.take();
-        let _ = std::fs::remove_file(&self.path);
+        if !self.keep_on_drop {
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
+}
+
+pub(super) async fn remove_checkpoint_file(path: &FsPath) {
+    if let Err(error) = tokio::fs::remove_file(path).await {
+        if error.kind() != std::io::ErrorKind::NotFound {
+            tracing::warn!("[Export] 清理消息续跑文件失败: {}", error.kind());
+        }
     }
 }
 
@@ -2298,6 +2357,7 @@ async fn process_export_task(
     mode: ExportMode,
     cancel_flag: &Arc<AtomicBool>,
     input: ExportInput,
+    saved_checkpoint: &mut Option<HistoryCheckpoint>,
 ) -> Result<(), String> {
     if is_cancelled(state, task_id, cancel_flag).await {
         return Err("任务已被用户停止".to_string());
@@ -2314,20 +2374,34 @@ async fn process_export_task(
 
     let roaming_scan = match &input {
         ExportInput::Roaming { config, .. } => Some(RoamingScanSummary::new(config).as_value()),
-        ExportInput::Standard => None,
+        ExportInput::Standard | ExportInput::Resume(_) => None,
     };
-    let starting_message = if roaming_scan.is_some() {
-        "开始有界漫游扫描..."
-    } else {
-        "开始获取消息..."
+    let resume = match &input {
+        ExportInput::Resume(checkpoint) => Some(checkpoint),
+        _ => None,
     };
+    if let Some(checkpoint) = resume {
+        if current_account_uid(state).await.as_deref() != Some(checkpoint.account_uid.as_str()) {
+            *saved_checkpoint = Some(checkpoint.clone());
+            return Err("请登录开始该导出时使用的 QQ 账号".to_string());
+        }
+    }
+    let starting_message = match &input {
+        ExportInput::Roaming { .. } => "开始有界漫游扫描...".to_string(),
+        ExportInput::Resume(checkpoint) => {
+            format!("继续获取消息，已保存 {} 条", checkpoint.message_count)
+        }
+        ExportInput::Standard => "开始获取消息...".to_string(),
+    };
+    let saved_count = resume.map_or(0, |checkpoint| checkpoint.message_count);
+    let progress = resume.map_or(0, HistoryCheckpoint::progress);
     let _ = update_and_broadcast_progress(
         state,
         task_id,
-        json!({ "status": "running", "progress": 0, "message": starting_message }),
-        0,
-        starting_message,
-        0,
+        json!({ "status": "running", "progress": progress, "messageCount": saved_count, "message": starting_message }),
+        progress,
+        &starting_message,
+        saved_count,
     )
     .await;
     let debug_session = if req.options.get("debugExport").and_then(Value::as_bool) == Some(true) {
@@ -2351,11 +2425,43 @@ async fn process_export_task(
     tokio::fs::create_dir_all(&req.output_dir)
         .await
         .map_err(|e| format!("创建输出目录失败: {e}"))?;
-    let mut spool =
-        RawMessageSpool::create(req.output_dir.join(format!(".qce_spool_{task_id}.jsonl"))).await?;
+    let checkpoint_path = if mode == ExportMode::StreamingZip && roaming_scan.is_none() {
+        state.path_manager.export_checkpoint_path(task_id)
+    } else {
+        None
+    };
+    let mut spool = if let Some(path) = &checkpoint_path {
+        if let Some(checkpoint) = resume {
+            RawMessageSpool::reopen(path.clone(), checkpoint).await?
+        } else {
+            let mut builder = tokio::fs::DirBuilder::new();
+            builder.recursive(true);
+            #[cfg(unix)]
+            builder.mode(0o700);
+            if let Some(dir) = path.parent() {
+                builder
+                    .create(dir)
+                    .await
+                    .map_err(|e| format!("创建消息续跑目录失败: {e}"))?;
+            }
+            RawMessageSpool::create(path.clone()).await?
+        }
+    } else {
+        RawMessageSpool::create(req.output_dir.join(format!(".qce_spool_{task_id}.jsonl"))).await?
+    };
     match input {
-        ExportInput::Standard => {
-            let batch_size = loose_i64(req.options.get("batchSize")).unwrap_or(5000);
+        ExportInput::Standard | ExportInput::Resume(_) => {
+            let batch_size = resume.map_or_else(
+                || loose_i64(req.options.get("batchSize")).unwrap_or(5000),
+                |checkpoint| checkpoint.batch_size,
+            );
+            let account_uid = if let Some(checkpoint) = resume {
+                Some(checkpoint.account_uid.clone())
+            } else if checkpoint_path.is_some() {
+                current_account_uid(state).await
+            } else {
+                None
+            };
             let fetcher = BatchMessageFetcher::new(
                 Arc::new(state.napcat.clone()),
                 BatchFetchConfig {
@@ -2370,19 +2476,23 @@ async fn process_export_task(
                 peer_uid: req.peer_uid.clone(),
                 guild_id: None,
             };
-            let start_time_ms =
-                normalize_to_ms(loose_i64(req.filter.get("startTime")).unwrap_or(0));
-            let end_time_ms =
-                normalize_to_ms(loose_i64(req.filter.get("endTime")).unwrap_or_else(now_ms));
+            let start_time_ms = resume.map_or_else(
+                || normalize_to_ms(loose_i64(req.filter.get("startTime")).unwrap_or(0)),
+                |checkpoint| checkpoint.start_time_ms,
+            );
+            let end_time_ms = resume.map_or_else(
+                || normalize_to_ms(loose_i64(req.filter.get("endTime")).unwrap_or_else(now_ms)),
+                |checkpoint| checkpoint.end_time_ms,
+            );
             let fetch_filter = MessageFilter {
                 start_time: Some(start_time_ms),
                 end_time: Some(end_time_ms),
                 ..MessageFilter::default()
             };
-            let mut previous = None;
-            let mut batch_count: i64 = 0;
-            let mut max_seq_seen: Option<i64> = None;
-            let mut min_seq_seen: Option<i64> = None;
+            let mut previous = resume.map(HistoryCheckpoint::previous_batch);
+            let mut batch_count = resume.map_or(0, |checkpoint| checkpoint.batch_count);
+            let mut max_seq_seen = resume.and_then(|checkpoint| checkpoint.max_seq_seen);
+            let mut min_seq_seen = resume.and_then(|checkpoint| checkpoint.min_seq_seen);
             loop {
                 if is_cancelled(state, task_id, cancel_flag).await {
                     fetcher.cancel();
@@ -2399,7 +2509,37 @@ async fn process_export_task(
                 let mut batch = match fetch_result {
                     Ok(Some(batch)) => batch,
                     Ok(None) => break,
-                    Err(error) => return Err(format!("获取消息失败: {error}")),
+                    Err(error) => {
+                        if let (Some(account_uid), Some(previous)) = (account_uid, previous) {
+                            if spool.count() > 0
+                                && (previous.next_seq.is_some()
+                                    || previous.next_message_id.is_some())
+                            {
+                                match spool.preserve().await {
+                                    Ok(byte_len) => {
+                                        *saved_checkpoint = Some(HistoryCheckpoint {
+                                            account_uid,
+                                            byte_len,
+                                            message_count: spool.count(),
+                                            next_seq: previous.next_seq,
+                                            next_message_id: previous.next_message_id,
+                                            start_time_ms,
+                                            end_time_ms,
+                                            batch_size: fetcher.current_batch_size().await,
+                                            batch_count,
+                                            max_seq_seen,
+                                            min_seq_seen,
+                                        });
+                                    }
+                                    Err(save_error) => tracing::warn!(
+                                        "[Export] 无法保存消息续跑断点: {}",
+                                        save_error.kind()
+                                    ),
+                                }
+                            }
+                        }
+                        return Err(format!("获取消息失败: {error}"));
+                    }
                 };
                 batch_count += 1;
                 for message in &batch.messages {
@@ -3150,6 +3290,7 @@ async fn process_export_task(
             "downloadUrl": final_download_url,
             "fileSize": file_size,
             "completedAt": now_iso(),
+            "historyCheckpoint": null,
             "fileName": final_file_name,
             "isZipExport": is_zip_export,
             "originalFilePath": original_file_path
@@ -3185,7 +3326,7 @@ async fn process_export_task(
                     .as_ref()
                     .map_or(Value::Null, |path| Value::String(path.to_string_lossy().to_string())),
             }),
-            task_roaming_scan(&completed_task),
+            Some(&completed_task),
         ));
     }
 
@@ -3229,7 +3370,7 @@ mod file_name_tests {
         apply_live_progress_patch, apply_task_patch, build_export_dir_name, build_export_file_name,
         export_ws_event, fallback_terminal_roaming_scan, generate_download_url,
         prepare_output_directory, publish_live_task_progress, release_export_path,
-        reserve_export_file_name, sanitize_chat_name, should_apply_task_patch, task_roaming_scan,
+        reserve_export_file_name, sanitize_chat_name, should_apply_task_patch,
     };
     use serde_json::{json, Value};
 
@@ -3418,7 +3559,7 @@ mod file_name_tests {
             let event = export_ws_event(
                 event_type,
                 json!({"taskId": "roaming_fixture"}),
-                task_roaming_scan(&roaming_task),
+                Some(&roaming_task),
             );
             assert_eq!(event["type"], event_type);
             assert_eq!(event["data"]["taskKind"], "roaming_export");
@@ -3546,15 +3687,19 @@ mod task_queue_tests {
     }
 
     async fn create_test_state() -> (crate::api::state::SharedState, std::path::PathBuf) {
+        create_test_state_with_bridge("http://127.0.0.1:40654").await
+    }
+
+    async fn create_test_state_with_bridge(bridge: &str) -> (SharedState, PathBuf) {
         let temp =
             std::env::temp_dir().join(format!("qce-test-queue-{}", uuid::Uuid::new_v4().simple()));
         std::fs::create_dir_all(&temp).expect("create temp dir");
         let db = Arc::new(crate::storage::DatabaseManager::new(&temp.join("qce.db")));
         db.initialize().await.expect("init db");
         let (ws_tx, _) = tokio::sync::broadcast::channel(16);
-        let path_manager = Arc::new(crate::paths::PathManager::new());
-        let napcat =
-            crate::napcat::NapCatBridgeClient::new("http://127.0.0.1:40654", 10_000).unwrap();
+        let path_manager = Arc::new(PathManager::with_base_dir(temp.clone()));
+        path_manager.set_custom_output_dir(temp.to_str()).unwrap();
+        let napcat = crate::napcat::NapCatBridgeClient::new(bridge, 10_000).unwrap();
         let resource_handler = Arc::new(
             crate::resource::ResourceHandler::new(
                 Arc::new(napcat.clone()),
@@ -3599,6 +3744,151 @@ mod task_queue_tests {
             port: 0,
         });
         (state, temp)
+    }
+
+    #[tokio::test]
+    async fn failed_streaming_zip_continues_from_the_saved_cursor() {
+        use axum::routing::post;
+        use std::io::Read as _;
+
+        let online = Arc::new(AtomicBool::new(false));
+        let latest_calls = Arc::new(AtomicUsize::new(0));
+        let handle_rpc = {
+            let online = Arc::clone(&online);
+            let latest_calls = Arc::clone(&latest_calls);
+            move |Json(body): Json<Value>| {
+                let online = Arc::clone(&online);
+                let latest_calls = Arc::clone(&latest_calls);
+                async move {
+                    let message = |seq: i64| {
+                        json!({
+                            "chatType": 1, "msgId": seq.to_string(), "msgSeq": seq.to_string(),
+                            "msgTime": (1_700_000_000 + seq).to_string(), "senderUid": "u_fixture",
+                            "senderUin": "12345", "sendNickName": "测试成员",
+                            "elements": [{"elementType": 1, "textElement": {"content": format!("消息 {seq}")}}],
+                        })
+                    };
+                    let result = match body["method"].as_str().unwrap_or_default() {
+                        "Core.selfInfo" => {
+                            json!({"uid": "u_exporter", "uin": "12346", "online": true})
+                        }
+                        "MsgService.getAioFirstViewLatestMsgs" => {
+                            latest_calls.fetch_add(1, Ordering::SeqCst);
+                            json!({"result": 0, "msgList": [message(2)]})
+                        }
+                        "MsgService.getMsgsIncludeSelf" => {
+                            if body["params"][1] == "2" {
+                                if online.load(Ordering::SeqCst) {
+                                    json!({"result": 0, "msgList": [message(1)]})
+                                } else {
+                                    json!({"result": 2_004_007, "errMsg": "reach max retry time limit!"})
+                                }
+                            } else {
+                                assert_eq!(body["params"][1], "1");
+                                json!({"result": 0, "msgList": []})
+                            }
+                        }
+                        _ => Value::Null,
+                    };
+                    Json(json!({"ok": true, "result": result}))
+                }
+            }
+        };
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let bridge = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                axum::Router::new().route("/rpc", post(handle_rpc)),
+            )
+            .await
+            .unwrap();
+        });
+        let (state, temp) = create_test_state_with_bridge(&bridge).await;
+        let response = export_streaming_zip(
+            State(Arc::clone(&state)),
+            Extension(RequestId("test".to_string())),
+            Json(json!({
+                "peer": {"chatType": 1, "peerUid": "u_fixture"},
+                "sessionName": "续跑测试",
+                "filter": {"startTime": 1_700_000_000, "endTime": 1_700_000_005},
+                "options": {"batchSize": 10, "includeResourceLinks": false},
+            })),
+        )
+        .await;
+        assert!(response.status().is_success());
+        let bytes = axum::body::to_bytes(response.into_body(), 16_384)
+            .await
+            .unwrap();
+        let response: Value = serde_json::from_slice(&bytes).unwrap();
+        let task_id = response["data"]["taskId"].as_str().unwrap().to_string();
+        let wait_for_terminal_task = || async {
+            tokio::time::timeout(Duration::from_secs(15), async {
+                loop {
+                    let task = state
+                        .export_tasks
+                        .lock()
+                        .await
+                        .get(&task_id)
+                        .cloned()
+                        .unwrap();
+                    let idle = !state
+                        .running_export_cancel_flags
+                        .lock()
+                        .await
+                        .contains_key(&task_id);
+                    if idle && matches!(task["status"].as_str(), Some("failed" | "completed")) {
+                        return task;
+                    }
+                    tokio::time::sleep(Duration::from_millis(25)).await;
+                }
+            })
+            .await
+            .expect("export should finish")
+        };
+        let failed = wait_for_terminal_task().await;
+        assert_eq!(failed["status"], "failed");
+        assert_eq!(failed["messageCount"], 1);
+        assert_eq!(failed["historyCheckpoint"]["next_message_id"], "2");
+        let view = crate::api::routes::tasks::normalize_task_for_frontend(&failed);
+        assert_eq!(view["canResume"], true);
+        assert!(view.get("historyCheckpoint").is_none());
+        let spool = state.path_manager.export_checkpoint_path(&task_id).unwrap();
+        // Simulate bytes written after the previous saved position, before a process stopped.
+        let mut file = tokio::fs::OpenOptions::new()
+            .append(true)
+            .open(&spool)
+            .await
+            .unwrap();
+        file.write_all(b"uncommitted tail\n").await.unwrap();
+        file.flush().await.unwrap();
+        drop(file);
+
+        online.store(true, Ordering::SeqCst);
+        let response = resume_streaming_zip(
+            State(Arc::clone(&state)),
+            Extension(RequestId("test".to_string())),
+            axum::extract::Path(task_id.clone()),
+        )
+        .await;
+        assert!(response.status().is_success());
+        let completed = wait_for_terminal_task().await;
+        assert_eq!(completed["status"], "completed", "{}", completed["error"]);
+        assert_eq!(completed["attempt"], 1);
+        assert_eq!(completed["messageCount"], 2);
+        assert_eq!(latest_calls.load(Ordering::SeqCst), 1);
+        assert!(!spool.exists());
+        let file = std::fs::File::open(completed["filePath"].as_str().unwrap()).unwrap();
+        let mut zip = zip::ZipArchive::new(file).unwrap();
+        let mut manifest = String::new();
+        zip.by_name("data/manifest.json")
+            .unwrap()
+            .read_to_string(&mut manifest)
+            .unwrap();
+        let manifest: Value = serde_json::from_str(&manifest).unwrap();
+        assert_eq!(manifest["stats"]["totalMessages"], 2);
+        server.abort();
+        let _ = std::fs::remove_dir_all(temp);
     }
 
     #[tokio::test]

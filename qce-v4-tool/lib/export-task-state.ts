@@ -4,6 +4,8 @@ export type ExportTaskUpdate = {
   taskId: string
   progress?: number
   status: ExportTask["status"]
+  attempt?: number
+  canResume?: boolean
   message?: string
   messageCount?: number
   error?: string
@@ -34,18 +36,23 @@ function activeExportTaskStatusRank(status: ExportTask["status"]): number | unde
 
 /** Keep lifecycle updates monotonic when REST and WebSocket delivery races. */
 function shouldRejectLifecycleRegression(
-  current: ExportTask["status"],
-  incoming: ExportTask["status"],
+  current: Pick<ExportTask, "status" | "attempt">,
+  incoming: Pick<ExportTask, "status" | "attempt">,
 ): boolean {
-  if (isTerminalExportTaskStatus(current)) return incoming !== current
-  const currentRank = activeExportTaskStatusRank(current)
-  const incomingRank = activeExportTaskStatusRank(incoming)
+  const currentAttempt = current.attempt ?? 0
+  const incomingAttempt = incoming.attempt ?? 0
+  if (currentAttempt !== incomingAttempt) return incomingAttempt < currentAttempt
+  if (isTerminalExportTaskStatus(current.status)) return incoming.status !== current.status
+  const currentRank = activeExportTaskStatusRank(current.status)
+  const incomingRank = activeExportTaskStatusRank(incoming.status)
   return currentRank !== undefined && incomingRank !== undefined && incomingRank < currentRank
 }
 
 export type ExportTaskResync = {
   taskId: string
   status: string
+  attempt?: number
+  canResume?: boolean
   progress: number
   messageCount: number
   error?: string
@@ -54,13 +61,20 @@ export type ExportTaskResync = {
 }
 
 export function mergeExportTaskUpdate(task: ExportTask, data: ExportTaskUpdate): ExportTask {
-  if (shouldRejectLifecycleRegression(task.status, data.status)) {
+  if (shouldRejectLifecycleRegression(task, data)) {
     return task
   }
   return {
     ...task,
+    ...((data.attempt ?? 0) > (task.attempt ?? 0) && {
+      attempt: data.attempt,
+      error: undefined,
+      completedAt: undefined,
+      canResume: undefined,
+    }),
     ...(data.progress !== undefined && { progress: data.progress }),
     status: data.status,
+    ...(data.canResume !== undefined && { canResume: data.canResume }),
     ...(data.messageCount !== undefined && { messageCount: data.messageCount }),
     ...(data.message !== undefined && { progressMessage: data.message }),
     ...(data.error !== undefined && { error: data.error }),
@@ -89,6 +103,8 @@ export function mergePendingExportTaskUpdate(
   return mergeExportTaskUpdate(remote, {
     taskId: pending.id,
     status: pending.status,
+    attempt: pending.attempt,
+    canResume: pending.canResume,
     progress: pending.progress,
     message: pending.progressMessage ?? pending.message,
     messageCount: pending.messageCount,
@@ -120,7 +136,7 @@ export function mergeExportTaskResync(
   const remoteStatus = knownStatuses.includes(remote.status as ExportTask["status"])
     ? remote.status as ExportTask["status"]
     : task.status
-  if (shouldRejectLifecycleRegression(task.status, remoteStatus)) {
+  if (shouldRejectLifecycleRegression(task, { status: remoteStatus, attempt: remote.attempt })) {
     return task
   }
 
@@ -128,15 +144,19 @@ export function mergeExportTaskResync(
   const nextMessageCount = Number.isFinite(remote.messageCount)
     ? remote.messageCount
     : task.messageCount
-  const nextError = remote.error ?? task.error
+  const isNewAttempt = (remote.attempt ?? 0) > (task.attempt ?? 0)
+  const nextError = remote.error ?? (isNewAttempt ? undefined : task.error)
+  const nextCanResume = remote.canResume ?? (isNewAttempt ? undefined : task.canResume)
   const nextTaskKind = remote.taskKind ?? task.taskKind
   const nextRoamingScan = remote.roamingScan ?? task.roamingScan
 
   if (
     remoteStatus === task.status &&
+    !isNewAttempt &&
     nextProgress === task.progress &&
     nextMessageCount === task.messageCount &&
     nextError === task.error &&
+    nextCanResume === task.canResume &&
     nextTaskKind === task.taskKind &&
     nextRoamingScan === task.roamingScan
   ) {
@@ -145,10 +165,12 @@ export function mergeExportTaskResync(
 
   return {
     ...task,
+    ...(isNewAttempt && { attempt: remote.attempt, completedAt: undefined }),
     status: remoteStatus,
     progress: nextProgress,
     messageCount: nextMessageCount,
     error: nextError,
+    canResume: nextCanResume,
     taskKind: nextTaskKind,
     roamingScan: nextRoamingScan,
   }
@@ -166,7 +188,7 @@ export function mergeRemoteExportTasks(
   )
   const mergedRemote = remote.map((task) => {
     const local = currentById.get(task.id)
-    if (local && shouldRejectLifecycleRegression(local.status, task.status)) {
+    if (local && shouldRejectLifecycleRegression(local, task)) {
       return local
     }
     return {
@@ -200,6 +222,8 @@ export function mergeCreatedExportTask(created: ExportTask, existing?: ExportTas
   return {
     ...created,
     status: existing.status,
+    attempt: existing.attempt ?? created.attempt,
+    canResume: existing.canResume ?? created.canResume,
     progress: existing.progress,
     messageCount: existing.messageCount ?? created.messageCount,
     progressMessage: existing.progressMessage ?? created.progressMessage,

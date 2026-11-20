@@ -5,6 +5,7 @@ use std::path::{Path as FsPath, PathBuf};
 
 use crate::api::path_security::resolve_existing_descendant_within;
 use crate::api::response::{self, ApiError, ErrorType, RequestId};
+use crate::api::routes::messages::remove_checkpoint_file;
 use crate::api::state::SharedState;
 
 /// 取任务 createdAt（毫秒），用于排序。
@@ -21,9 +22,14 @@ fn created_at_ms(task: &Value) -> i64 {
 /// 把内部任务格式转换为前端 `ExportTask` 接口期望的结构：
 /// - `taskId` → 额外加 `id` 字段（前端以 `id` 做匹配）
 /// - `filter.startTime` / `filter.endTime` 提升到顶层（前端直接读 `task.startTime`）
-fn normalize_task_for_frontend(task: &Value) -> Value {
+pub(super) fn normalize_task_for_frontend(task: &Value) -> Value {
     let mut t = task.clone();
     if let Some(obj) = t.as_object_mut() {
+        if obj.remove("historyCheckpoint").is_some()
+            && obj.get("status").and_then(Value::as_str) == Some("failed")
+        {
+            obj.insert("canResume".to_string(), Value::Bool(true));
+        }
         if let Some(tid) = obj.get("taskId").cloned() {
             obj.insert("id".to_string(), tid);
         }
@@ -97,6 +103,7 @@ fn transition_task_to_cancelled(task: &mut Value, completed_at: &str) -> Result<
         return Err(ApiError::validation("任务已结束", "TASK_ALREADY_FINISHED"));
     }
     if let Some(obj) = task.as_object_mut() {
+        obj.remove("historyCheckpoint");
         obj.insert("status".to_string(), Value::String("cancelled".to_string()));
         obj.insert(
             "completedAt".to_string(),
@@ -188,6 +195,9 @@ pub async fn delete_task(
     }
     if let Err(error) = state.db.delete_task(&task_id).await {
         tracing::warn!("[ApiServer] 删除任务持久化记录失败: {error}");
+    }
+    if let Some(path) = state.path_manager.export_checkpoint_path(&task_id) {
+        remove_checkpoint_file(&path).await;
     }
 
     state.broadcast_ws(&json!({

@@ -2,6 +2,7 @@ import test from "node:test"
 import assert from "node:assert/strict"
 
 import {
+    mergeExportTaskResync,
     mergeExportTaskUpdate,
     mergeRemoteExportTasks,
 } from "../../../../qce-v4-tool/lib/export-task-state.js"
@@ -46,4 +47,27 @@ test("stale polling response cannot revive a locally cancelled task", () => {
         [{ ...cancelled, status: "running", progress: 75 }],
     )
     assert.equal(merged[0], cancelled)
+})
+
+test("a new attempt resumes the failed task and rejects updates from the previous attempt", () => {
+    const failed: ExportTask = { ...task("failed"), canResume: true, error: "读取超时" }
+    const resumed = mergeExportTaskUpdate(failed, {
+        taskId: failed.id,
+        attempt: 1,
+        status: "running",
+        messageCount: 12,
+    })
+
+    assert.equal(resumed.id, failed.id)
+    assert.equal(resumed.status, "running")
+    assert.equal(resumed.messageCount, 12)
+    assert.equal(resumed.error, undefined)
+    assert.equal(mergeRemoteExportTasks([resumed], [failed])[0], resumed)
+    assert.equal(mergeExportTaskResync(resumed, {
+        taskId: failed.id,
+        status: "failed",
+        error: failed.error,
+        progress: 50,
+        messageCount: 12,
+    }), resumed)
 })
