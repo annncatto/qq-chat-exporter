@@ -115,6 +115,90 @@ mark.hl {
 .skel-body { display: flex; flex-direction: column; gap: 3px; }
 .skel-name { width: 72px; height: 11px; margin: 0 2px; }
 .skel-bubble { height: 38px; border-radius: 16px; }
+
+.qce-log-shell {
+  --log-board: color-mix(in srgb, var(--background) 95%, var(--foreground));
+  --log-sidebar-width: 15.5rem;
+  --log-sidebar-duration: 340ms;
+  --log-sidebar-easing: cubic-bezier(.2, .75, .25, 1);
+  background: var(--log-board);
+}
+
+.qce-log-sidebar-frame { flex: none; overflow: hidden; }
+.qce-log-sidebar { background: var(--log-board); }
+
+.qce-log-main {
+  margin: .5rem;
+  overflow: hidden;
+  border-radius: .875rem;
+  background: var(--background);
+  box-shadow: 0 1px 4px color-mix(in srgb, var(--foreground) 9%, transparent);
+}
+
+@media (min-width: 48rem) {
+  .qce-log-main { margin: .625rem; }
+
+  .qce-log-sidebar-frame {
+    width: 0;
+    transition: width var(--log-sidebar-duration) var(--log-sidebar-easing);
+  }
+
+  .qce-log-shell[data-sidebar-open='true'] .qce-log-sidebar-frame { width: var(--log-sidebar-width); }
+
+  .qce-log-sidebar {
+    width: var(--log-sidebar-width);
+    opacity: 0;
+    transform: translateX(-.625rem);
+    transition: opacity 190ms ease, transform var(--log-sidebar-duration) var(--log-sidebar-easing);
+  }
+
+  .qce-log-shell[data-sidebar-open='true'] .qce-log-sidebar {
+    opacity: 1;
+    transform: translateX(0);
+  }
+
+  .qce-log-shell[data-sidebar-open='true'] .qce-log-title { opacity: 0; }
+}
+
+@media (width < 48rem) {
+  .qce-log-sidebar-frame {
+    position: absolute;
+    inset: 0 auto 0 0;
+    z-index: 30;
+    width: min(var(--log-sidebar-width), calc(100% - 2rem));
+    border-radius: 0 .875rem .875rem 0;
+    box-shadow: 0 .75rem 2rem #0002;
+    visibility: hidden;
+    transform: translateX(-100%);
+    transition: transform var(--log-sidebar-duration) var(--log-sidebar-easing),
+      visibility 0s linear var(--log-sidebar-duration);
+  }
+
+  .qce-log-sidebar-overlay {
+    opacity: 0;
+    visibility: hidden;
+    transition: opacity var(--log-sidebar-duration) ease,
+      visibility 0s linear var(--log-sidebar-duration);
+  }
+
+  .qce-log-shell[data-sidebar-open='true'] .qce-log-sidebar-frame {
+    visibility: visible;
+    transform: translateX(0);
+    transition-delay: 0s;
+  }
+
+  .qce-log-shell[data-sidebar-open='true'] .qce-log-sidebar-overlay {
+    opacity: 1;
+    visibility: visible;
+    transition-delay: 0s;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .qce-log-shell { --log-sidebar-duration: 0s; }
+  .qce-log-shell :is(.qce-log-sidebar, .qce-log-title) { transition: none; }
+}
+
 .qce-log-top,
 .qce-log-tools,
 .qce-log-draft-bar {
@@ -123,22 +207,32 @@ mark.hl {
   flex-wrap: wrap;
   gap: .375rem;
   padding: .45rem .75rem;
-  border-color: var(--border);
   background: var(--background);
 }
 
-.qce-log-top { border-bottom: 1px solid var(--border); }
-.qce-log-title { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: .875rem; font-weight: 600; }
+.qce-log-top { padding: .625rem .75rem; }
+.qce-log-title { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: .875rem; font-weight: 600; transition: opacity 180ms ease; }
+.qce-log-shell[data-flow='true'] :is(.qce-log-chrome, .qce-log-draft) { display: none; }
 .qce-log-panes { display: grid; min-height: 0; flex: 1; grid-template: minmax(0, 1fr) / minmax(0, 1fr); }
+.qce-log-panes:has(.qce-log-compare) {
+  gap: .375rem;
+  margin-inline: .375rem;
+  border-radius: .625rem;
+  background: var(--log-board);
+}
+.qce-log-panes:has(.qce-log-compare) > :is(.qce-log-reading, .qce-log-compare) {
+  overflow: hidden;
+  border-radius: .625rem;
+  background: var(--background);
+}
 .qce-log-panes-horizontal { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 .qce-log-panes-vertical { grid-template-rows: repeat(2, minmax(0, 1fr)); }
 .qce-log-compare { display: flex; flex-direction: column; min-height: 0; min-width: 0; }
-.qce-log-panes-horizontal .qce-log-compare { border-inline-start: 1px solid var(--border); }
-.qce-log-panes-vertical .qce-log-compare { border-top: 1px solid var(--border); }
-.qce-log-compare-tools { display: flex; justify-content: space-between; gap: .375rem; align-items: center; padding: .25rem .5rem; border-bottom: 1px solid var(--border); font-size: .75rem; }
+.qce-log-compare-tools { display: flex; justify-content: space-between; gap: .375rem; align-items: center; padding: .25rem .5rem; font-size: .75rem; }
 .qce-log-panes-horizontal .message-wrapper { max-width: 82%; }
 .qce-log-count, .qce-log-status { font-size: .75rem; color: var(--muted-foreground); }
-.qce-log-tools { border-top: 1px solid var(--border); justify-content: space-between; }
+.qce-log-tools { justify-content: space-between; padding-block: .625rem; }
+.qce-log-active-pane { min-inline-size: calc(5em + 1rem); padding: .2rem .5rem; border-radius: .5rem; background: var(--muted); color: var(--muted-foreground); text-align: center; white-space: nowrap; }
 .qce-log-tool-group { display: flex; flex-wrap: wrap; align-items: center; gap: .375rem; font-size: .75rem; }
 .qce-log-tool-group label { display: flex; align-items: center; gap: .25rem; }
 .qce-log-tool-group input:not([type='checkbox']) { width: 8rem; }
@@ -150,10 +244,10 @@ mark.hl {
 .qce-log-export-details dd { text-align: right; }
 .qce-log-roles input, .qce-log-roles select { display: block; width: 100%; margin-top: .4rem; }
 .qce-log-chapters { width: 100%; margin-top: .4rem; table-layout: fixed; }
-.qce-log-chapters :is(th, td) { border-bottom: 1px solid var(--border); text-align: left; padding: .2rem 0; overflow-wrap: anywhere; }
+.qce-log-chapters :is(th, td) { text-align: left; padding: .25rem 0; overflow-wrap: anywhere; }
 .qce-log-chapters :is(th, td):last-child { text-align: right; width: 3rem; }
 .qce-log-chapters button { cursor: pointer; text-align: left; }
-.qce-log-roles input, .qce-log-roles select, .qce-log-tools input:not([type='checkbox']), .qce-log-draft select, .qce-log-edit textarea, .qce-log-draft textarea {
+.qce-log-roles input, .qce-log-roles select, .qce-log-tools input:not([type='checkbox']), .qce-log-draft-bar select, .qce-log-edit textarea, .qce-log-draft-text textarea {
   border: 1px solid var(--border);
   border-radius: .45rem;
   padding: .25rem .5rem;
@@ -183,16 +277,53 @@ mark.hl {
 .qce-log-edited { white-space: pre-wrap; overflow-wrap: anywhere; font-size: .875rem; }
 .qce-log-edited::before { display: block; content: '成稿正文'; color: var(--muted-foreground); font-size: .6875rem; }
 
-.qce-log-edit { display: grid; gap: .375rem; padding: .5rem .75rem; border-top: 1px solid var(--border); font-size: .8rem; }
-.qce-log-edit textarea, .qce-log-draft textarea { width: 100%; min-height: 4.5rem; resize: vertical; }
+.qce-log-edit { display: grid; gap: .375rem; margin: .375rem; padding: .5rem .75rem; border-radius: .625rem; background: var(--log-board); font-size: .8rem; }
+.qce-log-edit textarea, .qce-log-draft-text textarea { width: 100%; min-height: 4.5rem; resize: vertical; }
 .qce-log-edit-actions { display: flex; justify-content: flex-end; gap: .375rem; }
 .qce-log-draft { position: absolute; z-index: 25; right: .75rem; bottom: 4rem; display: flex; flex-direction: column; width: min(30rem, calc(100% - 1.5rem)); max-height: calc(100% - 8rem); background: var(--background); border: 1px solid var(--border); border-radius: .75rem; box-shadow: 0 .65rem 2rem #0002; font-size: .8125rem; overflow: hidden; }
+.qce-log-draft-full {
+  position: fixed;
+  inset: 0;
+  margin: auto;
+  width: min(68rem, calc(100% - 1.25rem));
+  height: calc(100dvh - 1.25rem);
+  max-width: none;
+  max-height: none;
+  overflow: hidden;
+  border: 0;
+  border-radius: .875rem;
+  background: var(--background);
+  color: var(--foreground);
+  box-shadow: 0 1rem 4rem #0003;
+}
+.qce-log-draft-full[open] { display: flex; flex-direction: column; }
+.qce-log-draft-full::backdrop { background: #0004; }
+.qce-log-draft-full .qce-log-draft-text {
+  flex: 1;
+  padding: 1.25rem max(1rem, calc((100% - 45rem) / 2));
+  font-size: .9375rem;
+  line-height: 1.75;
+}
+.qce-log-draft-full .qce-log-draft-text article { padding: .6rem 0; }
 .qce-log-draft-bar { min-height: 2.5rem; }
 .qce-log-draft-handle { cursor: grab; touch-action: none; user-select: none; font-weight: 600; }
 .qce-log-draft-handle:active { cursor: grabbing; }
 .qce-log-draft-text { min-height: 0; overflow: auto; padding: .5rem .75rem; }
 .qce-log-draft-round { margin: .5rem 0 .25rem; font-size: 1em; font-weight: 700; text-align: center; overflow-wrap: anywhere; }
-.qce-log-draft-text article { border-bottom: 1px solid var(--border); padding: .4rem 0; }
+.qce-log-draft-text article { padding: .4rem 0; }
+.qce-log-draft-entry-heading { display: flex; align-items: center; justify-content: space-between; gap: .5rem; }
+.qce-log-draft-delete {
+  padding: .125rem .375rem;
+  border-radius: .4rem;
+  color: var(--muted-foreground);
+  font-size: .75rem;
+  cursor: pointer;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 120ms ease;
+}
+.qce-log-draft-delete:is([data-visible='true'], :focus-visible) { opacity: 1; pointer-events: auto; }
+.qce-log-draft-delete:hover { background: var(--muted); color: var(--foreground); }
 .qce-log-manuscript-line { display: block; width: 100%; text-align: left; white-space: pre-wrap; overflow-wrap: anywhere; }
 .qce-log-manuscript-line[aria-pressed="true"] { background: var(--accent); }
 .qce-log-manuscript-line:disabled { color: var(--muted-foreground); cursor: default; }
@@ -209,5 +340,4 @@ mark.hl {
 
 @media (max-width: 639px) {
   .qce-log-panes-horizontal { grid-template: repeat(2, minmax(0, 1fr)) / minmax(0, 1fr); }
-  .qce-log-panes-horizontal .qce-log-compare { border-inline-start: 0; border-top: 1px solid var(--border); }
 }

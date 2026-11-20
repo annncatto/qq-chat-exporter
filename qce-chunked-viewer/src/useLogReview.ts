@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import type { PointerEvent, RefObject } from 'react';
 import type { FilteredDataSource, HyperScroll } from './hyperscroll';
 import type { ChunkStore, QceManifest, QceRecord } from './qce/chunk-store';
@@ -11,7 +11,37 @@ import {
 
 type DragState = { id: number; index: number; x: number; y: number; started: boolean; end?: number };
 
-export function useLogReview(store: RefObject<ChunkStore | null>, engine: RefObject<HyperScroll | null>, filter: RefObject<FilteredDataSource | null>, viewport: RefObject<HTMLDivElement | null>) {
+export interface ReviewTarget {
+  store: RefObject<ChunkStore | null>;
+  engine: RefObject<HyperScroll | null>;
+  filter: RefObject<FilteredDataSource | null>;
+  viewport: RefObject<HTMLDivElement | null>;
+}
+
+export function useReviewRows(pane: ReviewTarget, progress: ReviewProgress | null, active: boolean, selection: ReadonlySet<number>): void {
+  const { engine, viewport } = pane;
+  const cursor = active ? progress?.cursor ?? null : null;
+  const selected = active ? selection : null;
+
+  useLayoutEffect(() => {
+    const rows = viewport.current?.querySelectorAll<HTMLElement>('.hs-list > .hs-item[data-i]');
+    if (!rows) return;
+    for (const row of rows) {
+      const index = Number(row.dataset.i);
+      row.classList.toggle('qce-log-current', index === cursor);
+      row.classList.toggle('qce-log-selected', selected?.has(index) ?? false);
+    }
+  }, [viewport, cursor, selected]);
+
+  // Cursor and range changes only affect the classes of mounted rows. Rebuild
+  // the pane when persisted review content changes, keeping its visible anchor.
+  useEffect(() => {
+    engine.current?.syncAnchorToViewport();
+    engine.current?.refresh();
+  }, [engine, progress?.decisions, progress?.edits, progress?.chapters, progress?.roles]);
+}
+
+export function useLogReview(target: RefObject<ReviewTarget>) {
   const [progress, setProgress] = useState(emptyReview);
   const [selected, setSelected] = useState<ReadonlySet<number>>(new Set());
   const [chapter, setChapter] = useState('');
@@ -32,8 +62,6 @@ export function useLogReview(store: RefObject<ChunkStore | null>, engine: RefObj
   const undoStack = useRef<ReviewProgress[]>([]);
   const dragging = useRef<DragState | null>(null);
   const suppressClick = useRef(false);
-
-  useEffect(() => { engine.current?.refresh(); }, [engine, progress, selected]);
 
   function recordingProgress(manifest: QceManifest, initial?: ReviewProgress): ReviewProgress {
     const key = reviewKey(manifest);
@@ -104,65 +132,39 @@ export function useLogReview(store: RefObject<ChunkStore | null>, engine: RefObj
   }
 
   function sourceIndex(position: number): number | null {
-    if (position < 0 || position >= (filter.current?.count ?? store.current?.manifest.stats.totalMessages ?? 0)) return null;
-    return filter.current?.sourceIndex(position) ?? position;
+    if (position < 0 || position >= (target.current.filter.current?.count ?? target.current.store.current?.manifest.stats.totalMessages ?? 0)) return null;
+    return target.current.filter.current?.sourceIndex(position) ?? position;
   }
 
   function visiblePosition(index: number): number {
-    return filter.current?.indexOf(index) ?? index;
+    return target.current.filter.current?.indexOf(index) ?? index;
   }
 
   function currentIndex(): number | null {
     const index = state.current.cursor;
     if (index !== null) {
-      const row = viewport.current?.querySelector(`[data-i="${index}"]`);
+      const row = target.current.viewport.current?.querySelector(`[data-i="${index}"]`);
       if (row) {
         const box = row.getBoundingClientRect();
-        const bounds = viewport.current!.getBoundingClientRect();
+        const bounds = target.current.viewport.current!.getBoundingClientRect();
         if (box.bottom > bounds.top && box.top < bounds.bottom) return index;
       }
     }
-    return sourceIndex(engine.current?.getStats().anchor.index ?? 0);
+    return sourceIndex(target.current.engine.current?.getStats().anchor.index ?? 0);
   }
 
   function reveal(index: number | null): void {
     if (index !== null) {
       const position = visiblePosition(index);
-      if (position >= 0) engine.current?.scrollToIndex(position, -12);
+      if (position >= 0) target.current.engine.current?.centerOnIndex(position);
     }
-    viewport.current?.focus({ preventScroll: true });
-  }
-
-  function revealNext(index: number): void {
-    viewport.current?.focus({ preventScroll: true });
-    requestAnimationFrame(() => {
-      const view = viewport.current;
-      const scroller = engine.current;
-      if (!view || !scroller || state.current.cursor !== index) return;
-      const visible = visiblePosition(index);
-      if (visible < 0) return;
-      const row = view.querySelector(`.hs-item[data-i="${index}"]`);
-      const bounds = view.getBoundingClientRect();
-      if (!row) {
-        scroller.scrollToIndex(visible, -Math.round(bounds.height * .65));
-        return;
-      }
-      const box = row.getBoundingClientRect();
-      const margin = 12;
-      if (box.height >= bounds.height - 2 * margin) {
-        if (box.top >= bounds.bottom || box.bottom <= bounds.top) scroller.scrollBy(box.top - bounds.top - margin);
-      } else if (box.bottom > bounds.bottom) {
-        scroller.scrollBy(box.bottom - bounds.bottom + margin);
-      } else if (box.top < bounds.top) {
-        scroller.scrollBy(box.top - bounds.top - margin);
-      }
-    });
+    target.current.viewport.current?.focus({ preventScroll: true });
   }
 
   function selectRow(index: number): void {
-    if (suppressClick.current || edit) return;
+    if (suppressClick.current || unfinishedEdits.current.has(storageKey.current)) return;
     if (state.current.cursor !== index) commit({ ...state.current, cursor: index }, false);
-    viewport.current?.focus({ preventScroll: true });
+    target.current.viewport.current?.focus({ preventScroll: true });
   }
 
   function clearSelection(): void {
@@ -171,20 +173,49 @@ export function useLogReview(store: RefObject<ChunkStore | null>, engine: RefObj
     setSelected(selection.current);
   }
 
+  function nextUnreviewed(position: number, decisions: ReviewProgress['decisions']): number | null {
+    let index = sourceIndex(position);
+    while (index !== null && decisions[index]) index = sourceIndex(++position);
+    return index;
+  }
+
+  function excludeSelection(): void {
+    const previous = state.current;
+    const decisions = { ...previous.decisions };
+    let last = -1;
+    let count = 0;
+    for (const index of selection.current) {
+      const position = visiblePosition(index);
+      if (sourceIndex(position) !== index) continue;
+      decisions[index] = 'exclude';
+      last = Math.max(last, position);
+      count++;
+    }
+    if (!count) return;
+
+    const cursor = nextUnreviewed(last + 1, decisions) ?? sourceIndex(last);
+    clearSelection();
+    setRangeMode(false);
+    commit({ ...previous, cursor, decisions });
+    setStatus(`已排除 ${count.toLocaleString()} 条消息。`);
+    reveal(cursor);
+  }
+
   function decide(decision: Decision, editResult?: { index: number; text: string }): void {
+    if (busy) return;
+    if (decision === 'exclude' && selection.current.size) {
+      excludeSelection();
+      return;
+    }
     const index = editResult?.index ?? currentIndex();
-    if (index === null || busy) return;
+    if (index === null) return;
     const previous = state.current;
     const label = chapter.trim();
     if (autoChapter && !label) { setStatus('请填写当前章节或回合。'); return; }
     const position = visiblePosition(index);
-    let next = sourceIndex(position + 1);
-    if (!previous.decisions[index]) {
-      while (next !== null && previous.decisions[next]) {
-        const nextPosition = visiblePosition(next);
-        next = sourceIndex(nextPosition + 1);
-      }
-    }
+    const next = previous.decisions[index]
+      ? sourceIndex(position + 1)
+      : nextUnreviewed(position + 1, previous.decisions);
     setEdit(null);
     clearSelection();
     setStatus(next === null ? '已到当前列表末尾。' : '');
@@ -195,18 +226,18 @@ export function useLogReview(store: RefObject<ChunkStore | null>, engine: RefObj
       edits: editResult ? { ...previous.edits, [index]: editResult.text } : previous.edits,
       chapters: autoChapter ? { ...previous.chapters, [index]: label } : previous.chapters,
     });
-    if (next !== null) revealNext(next);
-    else viewport.current?.focus({ preventScroll: true });
+    reveal(next ?? index);
   }
 
   async function beginEdit(): Promise<void> {
     const index = currentIndex();
-    const source = store.current;
+    const pane = target.current;
+    const source = pane.store.current;
     if (index === null || busy || !source) return;
     setBusy(true);
     try {
       const row = await loadReviewRecord(source, index);
-      if (store.current !== source) return;
+      if (target.current !== pane || pane.store.current !== source) return;
       setEdit({ index, text: state.current.edits[index] ?? reviewBody(row) });
       selectRow(index);
     } catch (error) {
@@ -227,7 +258,7 @@ export function useLogReview(store: RefObject<ChunkStore | null>, engine: RefObj
 
   function cancelEdit(): void {
     setEdit(null);
-    viewport.current?.focus({ preventScroll: true });
+    target.current.viewport.current?.focus({ preventScroll: true });
   }
 
   function range(start: number, end: number): void {
@@ -245,7 +276,7 @@ export function useLogReview(store: RefObject<ChunkStore | null>, engine: RefObj
 
   function pointerDown(event: PointerEvent<HTMLDivElement>): void {
     const target = event.target as HTMLElement;
-    if (dragging.current || edit || event.button !== 0 || (event.pointerType === 'touch' && !rangeMode)) return;
+    if (dragging.current || unfinishedEdits.current.has(storageKey.current) || event.button !== 0 || (event.pointerType === 'touch' && !rangeMode)) return;
     if (target.closest('a,button,input,textarea,label,select,[role="button"],.image-content img,.sticker-wrap,.forward-card')) return;
     const row = target.closest<HTMLElement>('.hs-item[data-i]');
     if (!row || row.querySelector('.skel-row')) return;
@@ -274,8 +305,8 @@ export function useLogReview(store: RefObject<ChunkStore | null>, engine: RefObj
         range(drag.index, end);
       }
     }
-    if (y < box.top + 20) engine.current?.scrollBy(-20);
-    if (y > box.bottom - 20) engine.current?.scrollBy(20);
+    if (y < box.top + 20) target.current.engine.current?.scrollBy(-20);
+    if (y > box.bottom - 20) target.current.engine.current?.scrollBy(20);
   }
 
   function pointerEnd(event: PointerEvent<HTMLDivElement>): void {
@@ -288,6 +319,7 @@ export function useLogReview(store: RefObject<ChunkStore | null>, engine: RefObj
       if (event.pointerType === 'touch') setRangeMode(false);
     }
     dragging.current = null;
+    if (!drag.started && event.type === 'pointerup') selectRow(drag.index);
   }
 
   function assign(): void {
@@ -297,7 +329,7 @@ export function useLogReview(store: RefObject<ChunkStore | null>, engine: RefObj
     commit({ ...state.current, chapters });
     clearSelection();
     setRangeMode(false);
-    viewport.current?.focus({ preventScroll: true });
+    target.current.viewport.current?.focus({ preventScroll: true });
   }
 
   function jumpChapter(chapter: string): void {
@@ -321,22 +353,25 @@ export function useLogReview(store: RefObject<ChunkStore | null>, engine: RefObj
     commit({ ...state.current, roles });
   }
 
-  function decorate(index: number, row: QceRecord, html: string): string {
-    return renderLogRow(index, row, html, state.current, store.current!.manifest, selection.current.has(index));
+  function decorate(index: number, row: QceRecord, html: string, manifest: QceManifest, active: boolean): string {
+    const progress = reviewKey(manifest) === storageKey.current ? state.current : recordingProgress(manifest);
+    return renderLogRow(index, row, html, active ? progress : { ...progress, cursor: null }, manifest,
+      active && selection.current.has(index));
   }
 
   function saveProgress(): void {
-    const manifest = store.current?.manifest;
+    const manifest = target.current.store.current?.manifest;
     if (manifest) saveReviewFile(manifest.chat.name, 'qcelog', progressBackup(manifest, state.current));
   }
 
   async function openProgress(file: File): Promise<void> {
-    const source = store.current;
+    const pane = target.current;
+    const source = pane.store.current;
     if (!source || busy) return;
     setBusy(true);
     try {
       const next = readProgressBackup(await file.text(), source.manifest);
-      if (store.current !== source) return;
+      if (target.current !== pane || pane.store.current !== source) return;
       setEdit(null);
       setDraft(null);
       clearSelection();
@@ -350,16 +385,16 @@ export function useLogReview(store: RefObject<ChunkStore | null>, engine: RefObj
     }
   }
 
-  function buildDraft(recordings: LogRecording[], title: string): Promise<ReviewDraft> {
+  function buildDraft(recordings: LogRecording[], title: string, allowEmpty: boolean): Promise<ReviewDraft> {
     return makeReviewProject(title, recordings.filter(recording => recording.included).map(recording => ({
       key: recording.key, label: recording.label, store: recording.store,
       progress: recordingProgress(recording.store.manifest, recording.initial),
-    })));
+    })), allowEmpty);
   }
 
   function refreshDraft(recordings: LogRecording[], title: string): () => void {
     let cancelled = false;
-    void buildDraft(recordings, title).then(next => {
+    void buildDraft(recordings, title, true).then(next => {
       if (!cancelled) setDraft(previous => previous ? next : null);
     }).catch(error => {
       if (!cancelled) setStatus(error instanceof Error ? error.message : '无法更新成稿。');
@@ -368,11 +403,11 @@ export function useLogReview(store: RefObject<ChunkStore | null>, engine: RefObj
   }
 
   async function showDraft(recordings: LogRecording[], title: string, format?: DraftFormat): Promise<void> {
-    if (busy || !store.current) return;
+    if (busy || !target.current.store.current) return;
     setBusy(true);
     setStatus(format ? '正在生成文件…' : '正在生成成稿…');
     try {
-      const result = await buildDraft(recordings, title);
+      const result = await buildDraft(recordings, title, !format);
       if (format) {
         saveReviewFile(title, format, outputDraft(result.project, format));
       } else setDraft(result);
@@ -384,17 +419,43 @@ export function useLogReview(store: RefObject<ChunkStore | null>, engine: RefObj
     }
   }
 
-  function updateDraftProgress(recording: LogRecording, update: (before: ReviewProgress) => ReviewProgress): void {
+  function updateDraftProgress(recording: LogRecording, update: (before: ReviewProgress) => ReviewProgress, remember = true): void {
     const manifest = recording.store.manifest;
     const key = reviewKey(manifest);
     const before = recordingProgress(manifest, recording.initial);
     const next = update(before);
     if (next === before) return;
-    if (key === storageKey.current) commit(next);
+    if (key === storageKey.current) commit(next, remember);
     else {
       persist(key, next);
       setDraftRevision(previous => previous + 1);
     }
+  }
+
+  function setDraftDecisions(recordings: LogRecording[], entries: DraftEntry[], decision: Decision): DraftEntry[] {
+    const sources = new Map<string, DraftEntry[]>();
+    for (const entry of entries) {
+      const source = sources.get(entry.key);
+      if (source) source.push(entry);
+      else sources.set(entry.key, [entry]);
+    }
+    const changed: DraftEntry[] = [];
+    const expected = decision === 'exclude' ? 'keep' : 'exclude';
+    for (const recording of recordings) {
+      const source = sources.get(recording.key);
+      if (!source) continue;
+      updateDraftProgress(recording, before => {
+        const matches = source.filter(entry => before.decisions[entry.index] === expected);
+        if (!matches.length) return before;
+        const decisions = { ...before.decisions };
+        for (const entry of matches) {
+          decisions[entry.index] = decision;
+          changed.push(entry);
+        }
+        return { ...before, decisions };
+      }, false);
+    }
+    return changed;
   }
 
   function editDraft(recording: LogRecording, entry: DraftEntry, text: string): void {
@@ -425,6 +486,6 @@ export function useLogReview(store: RefObject<ChunkStore | null>, engine: RefObj
     edit, setEdit, cancelEdit, draft, setDraft, draftRevision, refreshDraft, status, busy, selectRow, clearSelection, decide, beginEdit,
     undo, canUndo: undoStack.current.length > 0, pointerDown, pointerMove, pointerEnd, assign, jumpChapter, openRow, renameRole,
     recordingProgress, includeRoles,
-    decorate, saveProgress, openProgress, showDraft, editDraft, linkDraftEntries, unlinkDraftExchange,
+    decorate, saveProgress, openProgress, showDraft, editDraft, linkDraftEntries, unlinkDraftExchange, setDraftDecisions,
   };
 }

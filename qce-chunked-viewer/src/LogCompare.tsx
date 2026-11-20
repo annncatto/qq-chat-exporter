@@ -1,24 +1,32 @@
-import { useEffect, useRef, type MouseEvent } from 'react';
+import { useEffect, useRef, type KeyboardEvent, type MouseEvent, type PointerEvent, type RefObject } from 'react';
 import { Button } from '@/components/ui/button';
 import { HyperScroll } from './hyperscroll';
-import { renderLogRow, type ReviewProgress } from './qce/log-review';
+import type { QceRecord } from './qce/chunk-store';
 import type { LogRecording } from './qce/log-workspace';
 import { installMediaFallback } from './qce/media-fallback';
 
-export function LogCompare({ recordings, recording, progress, onChoose, onOpen, onClick, findMessage }: {
+export function LogCompare({ recordings, recording, decorate, rangeMode, onChoose, onOpen, onClick, onActivate, onSelect,
+  onKeyDown, onPointerDown, onPointerMove, onPointerEnd, findMessage, engine, view }: {
   recordings: LogRecording[];
   recording: LogRecording;
-  progress: ReviewProgress;
+  decorate: (index: number, row: QceRecord, html: string) => string;
+  rangeMode: boolean;
   onChoose: (key: string) => void;
   onOpen: (index: number) => void;
   onClick: (event: MouseEvent<HTMLDivElement>, select: (index: number) => void, jump: (id: string) => void) => void;
+  onActivate: () => void;
+  onSelect: (index: number) => void;
+  onKeyDown: (event: KeyboardEvent<HTMLDivElement>, jump: (id: string) => void) => void;
+  onPointerDown: (event: PointerEvent<HTMLDivElement>) => void;
+  onPointerMove: (event: PointerEvent<HTMLDivElement>) => void;
+  onPointerEnd: (event: PointerEvent<HTMLDivElement>) => void;
   findMessage: (id: string) => Promise<number | null>;
+  engine: RefObject<HyperScroll | null>;
+  view: RefObject<HTMLDivElement | null>;
 }) {
-  const view = useRef<HTMLDivElement>(null);
-  const engine = useRef<HyperScroll | null>(null);
-  const current = useRef(progress);
+  const decorateRef = useRef(decorate);
   const positions = useRef(new Map<string, { index: number; offset: number }>());
-  current.current = progress;
+  decorateRef.current = decorate;
 
   useEffect(() => {
     const el = view.current;
@@ -31,10 +39,10 @@ export function LogCompare({ recordings, recording, progress, onChoose, onOpen, 
         if (!row) return `<div class="hs-item" data-i="${index}"><div class="skel-row"></div></div>`;
         // The main pane owns the document-level message and date IDs.
         const html = row.html.replace(/(<[^>]*?)\s+id="[^"]*"/g, '$1');
-        return renderLogRow(index, row, html, { ...current.current, cursor: null }, store.manifest);
+        return decorateRef.current(index, row, html);
       },
     };
-    const scroller = new HyperScroll(el, { dataSource: source });
+    const scroller = new HyperScroll(el, { dataSource: source, keyboard: true });
     engine.current = scroller;
     const restore = positions.current.get(recording.key);
     if (restore) scroller.scrollToIndex(restore.index, restore.offset);
@@ -47,8 +55,14 @@ export function LogCompare({ recordings, recording, progress, onChoose, onOpen, 
       scroller.destroy();
       engine.current = null;
     };
-  }, [recording.store, recording.key]);
-  useEffect(() => { engine.current?.refresh(); }, [progress]);
+  }, [recording.store, recording.key, engine, view]);
+
+  function jump(id: string): void {
+    const scroller = engine.current;
+    void findMessage(id).then(index => {
+      if (index !== null && engine.current === scroller) scroller?.scrollToIndex(index, -40);
+    }).catch(() => undefined);
+  }
 
   return <section className="qce-log-compare" aria-label="对照窗">
     <div className="qce-log-compare-tools">
@@ -61,20 +75,17 @@ export function LogCompare({ recordings, recording, progress, onChoose, onOpen, 
       </label>
       <Button type="button" variant="ghost" size="sm" onClick={() => onOpen(engine.current?.getStats().anchor.index ?? 0)}>在主窗打开</Button>
     </div>
-    <div ref={view} className="qce-viewport min-h-0 flex-1" tabIndex={0} aria-label="对照消息"
-      onClick={event => onClick(event, onOpen, id => {
-        void findMessage(id).then(index => {
-          if (index !== null) engine.current?.scrollToIndex(index, -40);
-        }).catch(() => undefined);
-      })}
-      onKeyDown={event => {
-        if (event.target !== view.current) return;
-        const scroller = engine.current;
-        if (!scroller) return;
-        const movement = { ArrowDown: 60, ArrowUp: -60, PageDown: view.current.clientHeight * .9, PageUp: -view.current.clientHeight * .9 }[event.key];
-        if (movement === undefined) return;
-        event.preventDefault();
-        scroller.scrollBy(movement);
-      }} />
+    <div ref={view} className={`qce-viewport min-h-0 flex-1${rangeMode ? ' qce-log-range' : ''}`} tabIndex={0} aria-label="对照消息"
+      onFocus={onActivate}
+      onClick={event => onClick(event, onSelect, jump)}
+      onKeyDown={event => onKeyDown(event, jump)}
+      onPointerDown={event => {
+        if (event.button === 0) onActivate();
+        onPointerDown(event);
+      }}
+      onPointerMove={onPointerMove}
+      onPointerUp={onPointerEnd}
+      onPointerCancel={onPointerEnd}
+      onPointerLeave={onPointerEnd} />
   </section>;
 }

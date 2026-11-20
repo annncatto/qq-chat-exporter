@@ -41,9 +41,9 @@ import { Loader } from '@/components/ui/loader';
 import { MediaPreview, downloadUrl, type MediaItem } from '@/components/ui/media-preview';
 import { createTextBloomProbe, createTokenBloomProbe } from './qce/bloom';
 import { ChunkStore, loadManifest } from './qce/chunk-store';
-import { reviewKey, roleAlias, roleKey } from './qce/log-review';
+import { reviewKey, roleAlias, roleKey, type DraftEntry } from './qce/log-review';
 import { loadLogWorkspace, openStoredRecording, readRecording, readRecordingFolder, saveLogWorkspace, type LogRecording, type StoredRecording } from './qce/log-workspace';
-import { useLogReview } from './useLogReview';
+import { useLogReview, useReviewRows, type ReviewTarget } from './useLogReview';
 import { LogDraft } from './LogDraft';
 import { LogSources } from './LogSources';
 import { LogCompare } from './LogCompare';
@@ -54,6 +54,7 @@ import {
 
 const QCE_REPO = 'https://github.com/shuakami/qq-chat-exporter';
 const HS_REPO = 'https://github.com/shuakami/hyperscroll';
+const SIDEBAR_DESKTOP_QUERY = '(min-width: 48rem)';
 
 type IconComponent = React.ComponentType<{ className?: string }>;
 
@@ -278,9 +279,13 @@ function fnv1a32(str: string, seed: number): number {
 export default function Viewer(): React.ReactElement {
   const viewportRef = useRef<HTMLDivElement>(null);
   const engineRef = useRef<HyperScroll | null>(null);
+  const compareViewportRef = useRef<HTMLDivElement>(null);
+  const compareEngineRef = useRef<HyperScroll | null>(null);
   const storeRef = useRef<ChunkStore | null>(null);
+  const compareStoreRef = useRef<ChunkStore | null>(null);
   const highlightRef = useRef('');
   const filterSourceRef = useRef<FilteredDataSource | null>(null);
+  const noFilterRef = useRef<FilteredDataSource | null>(null);
   const searchRef = useRef<SearchState | null>(null);
   const filterRunRef = useRef(0);
   const replyReturnTimerRef = useRef<number | null>(null);
@@ -289,7 +294,11 @@ export default function Viewer(): React.ReactElement {
   );
   const playingVoiceRef = useRef<HTMLElement | null>(null);
   const playingSrcRef = useRef('');
-  const review = useLogReview(storeRef, engineRef, filterSourceRef, viewportRef);
+  const mainTarget = useMemo<ReviewTarget>(() => ({ store: storeRef, engine: engineRef, filter: filterSourceRef, viewport: viewportRef }), []);
+  const compareTarget = useMemo<ReviewTarget>(() => ({ store: compareStoreRef, engine: compareEngineRef, filter: noFilterRef, viewport: compareViewportRef }), []);
+  const reviewTarget = useRef(mainTarget);
+  const [reviewPane, setReviewPane] = useState<'main' | 'compare'>('main');
+  const review = useLogReview(reviewTarget);
 
   const [recordings, setRecordings] = useState<LogRecording[]>([]);
   const recordingsRef = useRef<LogRecording[]>([]);
@@ -305,6 +314,24 @@ export default function Viewer(): React.ReactElement {
   const activeRecording = recordings.find(recording => recording.key === activeKey) ?? rootRecording;
   const comparison = recordings.find(recording => recording.key === compareKey) ?? rootRecording;
   const manifest = activeRecording?.store.manifest ?? null;
+  const mainProgress = activeRecording ? review.recordingProgress(activeRecording.store.manifest, activeRecording.initial) : null;
+  const compareProgress = layout !== 'single' && comparison ? review.recordingProgress(comparison.store.manifest, comparison.initial) : null;
+  useReviewRows(mainTarget, mainProgress, reviewPane === 'main', review.selected);
+  useReviewRows(compareTarget, compareProgress, reviewPane === 'compare', review.selected);
+
+  function activateReviewPane(pane: typeof reviewPane, recording = pane === 'main' ? activeRecording : comparison): void {
+    if (!recording || !rootRecording) return;
+    const nextTarget = pane === 'main' ? mainTarget : compareTarget;
+    const previousStore = reviewTarget.current.store.current;
+    if (reviewTarget.current === nextTarget && previousStore === recording.store) return;
+    preserveReadingPosition();
+    if (pane === 'compare') compareStoreRef.current = recording.store;
+    reviewTarget.current = nextTarget;
+    setReviewPane(pane);
+    if (previousStore !== recording.store) review.initialize(recording.store.manifest, rootRecording.key, recording.initial);
+    else review.clearSelection();
+  }
+
   const [filters, setFilters] = useState<Filters>(NO_FILTERS);
   const filtersRef = useRef<Filters>(NO_FILTERS);
   const [query, setQuery] = useState('');
@@ -316,6 +343,13 @@ export default function Viewer(): React.ReactElement {
   const [canClear, setCanClear] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [sidebarOnDesktop, setSidebarOnDesktop] = useState(() => window.matchMedia(SIDEBAR_DESKTOP_QUERY).matches);
+  const [flowMode, setFlowMode] = useState(false);
+  const [draftMode, setDraftMode] = useState<'preview' | 'full'>('preview');
+  const [lastDraftDeletion, setLastDraftDeletion] = useState<DraftEntry[]>([]);
+  const returnToDraftPreview = useRef(false);
+  const shellRef = useRef<HTMLDivElement>(null);
+  const sidebarExpanded = !flowMode && (sidebarOnDesktop ? !sidebarCollapsed : sidebarOpen);
   const [roleSender, setRoleSender] = useState('');
   const [loadedChunks, setLoadedChunks] = useState(0);
   const [preview, setPreview] = useState<MediaItem | null>(null);
@@ -332,6 +366,56 @@ export default function Viewer(): React.ReactElement {
         window.matchMedia('(prefers-color-scheme: dark)').matches) ||
       localStorage.getItem('qce-theme') === 'dark',
   );
+
+  useEffect(() => {
+    const media = window.matchMedia(SIDEBAR_DESKTOP_QUERY);
+    const update = () => {
+      setSidebarOnDesktop(media.matches);
+      if (media.matches) setSidebarOpen(false);
+    };
+    update();
+    media.addEventListener('change', update);
+    return () => media.removeEventListener('change', update);
+  }, []);
+
+  useEffect(() => {
+    let wasFullscreen = false;
+    const onFullscreenChange = () => {
+      const isFullscreen = document.fullscreenElement === shellRef.current;
+      if (wasFullscreen && !isFullscreen) {
+        preserveReadingPosition();
+        setFlowMode(false);
+      }
+      wasFullscreen = isFullscreen;
+    };
+    document.addEventListener('fullscreenchange', onFullscreenChange);
+    return () => document.removeEventListener('fullscreenchange', onFullscreenChange);
+  }, []);
+
+  function preserveReadingPosition(): void {
+    engineRef.current?.syncAnchorToViewport();
+    compareEngineRef.current?.syncAnchorToViewport();
+  }
+
+  function exitFlowMode(): void {
+    preserveReadingPosition();
+    setFlowMode(false);
+    if (shellRef.current && document.fullscreenElement === shellRef.current) {
+      void document.exitFullscreen().catch(() => undefined);
+    }
+  }
+
+  function toggleFlowMode(): void {
+    if (flowMode) {
+      exitFlowMode();
+      return;
+    }
+    preserveReadingPosition();
+    setSidebarOpen(false);
+    setFlowMode(true);
+    void shellRef.current?.requestFullscreen?.().catch(() => undefined);
+    if (!review.edit) reviewTarget.current.viewport.current?.focus({ preventScroll: true });
+  }
 
   useEffect(() => {
     document.documentElement.classList.toggle('dark', dark);
@@ -440,7 +524,7 @@ export default function Viewer(): React.ReactElement {
     }
   }
 
-  function onViewportKeyDown(e: React.KeyboardEvent): void {
+  function onViewportKeyDown(e: React.KeyboardEvent, jump = (id: string, from?: string) => { void jumpToMessageId(id, from); }): void {
     if (!e.repeat && !e.altKey && (e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z') {
       e.preventDefault();
       review.undo();
@@ -463,7 +547,7 @@ export default function Viewer(): React.ReactElement {
     if (!msgId) return;
     e.preventDefault();
     const sourceId = reply.closest('.message[id]')?.id;
-    void jumpToMessageId(msgId, sourceId);
+    jump(msgId, sourceId);
   }
 
   function toggleVoice(el: HTMLElement, src: string): void {
@@ -649,6 +733,7 @@ export default function Viewer(): React.ReactElement {
   }
 
   function openRecording(key: string, index?: number): void {
+    activateReviewPane('main');
     if (key === activeRecording?.key) {
       if (index !== undefined) {
         if (filterSourceRef.current) applyFilters(NO_FILTERS);
@@ -668,6 +753,8 @@ export default function Viewer(): React.ReactElement {
     const { store, key, initial } = activeRecording;
     const { manifest } = store;
     storeRef.current = store;
+    reviewTarget.current = mainTarget;
+    setReviewPane('main');
     const reviewPosition = review.initialize(manifest, rootRecording.key, initial);
     filterRunRef.current++;
     filterSourceRef.current = null;
@@ -746,11 +833,11 @@ export default function Viewer(): React.ReactElement {
       count: store.manifest.stats.totalMessages,
       renderToString(i) {
         const rec = store.get(i);
-        return rec ? review.decorate(i, rec, rec.html) : skeletonHtml(i);
+        return rec ? review.decorate(i, rec, rec.html, store.manifest, reviewTarget.current === mainTarget) : skeletonHtml(i);
       },
       renderSeekToString(i) {
         const rec = store.get(i);
-        return rec ? review.decorate(i, rec, withoutSeekMediaSources(rec.html)) : skeletonHtml(i);
+        return rec ? review.decorate(i, rec, withoutSeekMediaSources(rec.html), store.manifest, reviewTarget.current === mainTarget) : skeletonHtml(i);
       },
       estimateHeight: (i) => estimateRowHeight(store.get(i)),
     };
@@ -773,6 +860,7 @@ export default function Viewer(): React.ReactElement {
     const engine = engineRef.current;
     const store = storeRef.current;
     if (!engine || !store) return;
+    activateReviewPane('main');
     review.clearSelection();
     const run = ++filterRunRef.current;
     resetSearch();
@@ -847,6 +935,7 @@ export default function Viewer(): React.ReactElement {
     const engine = engineRef.current;
     const store = storeRef.current;
     if (!engine || !store) return;
+    activateReviewPane('main');
     const q = query.trim().toLowerCase();
     resetSearch();
     if (!q) return;
@@ -918,15 +1007,30 @@ export default function Viewer(): React.ReactElement {
   const selectedRole = manifest?.senders.find(sender => sender.uid === roleSender);
   const selectedRoleKey = manifest && selectedRole ? roleKey(selectedRole, manifest) : '';
   const reviewedCount = Object.keys(review.progress.decisions).length;
-  const canDraft = recordings.some(recording => recording.included &&
+  const reviewTotal = (reviewPane === 'compare' ? comparison : activeRecording)?.store.manifest.stats.totalMessages ?? 0;
+  const canDraft = lastDraftDeletion.length > 0 || recordings.some(recording => recording.included &&
     Object.values(review.recordingProgress(recording.store.manifest, recording.initial).decisions).includes('keep'));
   const draftTitle = recordings.filter(recording => recording.included).length > 1 ? (rootRecording?.label ?? label) + ' - 合并成稿' : label;
   const draftOpen = Boolean(review.draft);
+
+  function openDraft(mode: typeof draftMode): void {
+    if (mode === 'full') returnToDraftPreview.current = draftOpen && draftMode === 'preview';
+    setDraftMode(mode);
+    if (!draftOpen) void review.showDraft(recordings, draftTitle);
+  }
+
+  function closeDraft(): void {
+    if (draftMode === 'full' && returnToDraftPreview.current) {
+      setDraftMode('preview');
+      return;
+    }
+    review.setDraft(null);
+  }
+
   useEffect(() => {
     if (!draftOpen) return;
-    if (!canDraft) { review.setDraft(null); return; }
     return review.refreshDraft(recordings, draftTitle);
-  }, [draftOpen, canDraft, recordings, draftTitle, review.progress.decisions, review.progress.edits,
+  }, [draftOpen, recordings, draftTitle, review.progress.decisions, review.progress.edits,
     review.progress.chapters, review.progress.roles, review.progress.exchanges, review.draftRevision]);
   const chapters = useMemo(() => {
     const counts = new Map<string, number>();
@@ -937,14 +1041,21 @@ export default function Viewer(): React.ReactElement {
   }, [review.progress.chapters]);
 
   return (
-    <div className="relative flex h-dvh bg-background text-foreground">
+    <div ref={shellRef} className="qce-log-shell relative flex h-dvh text-foreground"
+      data-sidebar-open={sidebarExpanded} data-flow={flowMode}
+      onKeyDown={event => {
+        if (event.key === 'Escape' && flowMode && !event.defaultPrevented && !review.edit && !preview && !settingsOpen) {
+          event.preventDefault();
+          exitFlowMode();
+        }
+      }}>
       {/* Sidebar */}
       <aside
         id="qce-viewer-sidebar"
-        className={`qce-log-sidebar absolute inset-y-0 left-0 z-30 flex w-[17rem] shrink-0 flex-col overflow-y-auto border-r border-border bg-background px-4 py-4 transition-transform duration-200 md:visible md:static md:translate-x-0 ${
-          sidebarOpen ? 'translate-x-0' : 'invisible -translate-x-full'
-        } ${sidebarCollapsed ? 'md:hidden' : ''}`}
+        className="qce-log-sidebar-frame"
+        inert={!sidebarExpanded}
       >
+        <div className="qce-log-sidebar flex h-full flex-col overflow-y-auto px-4 py-4">
         <div>
           <div className="font-semibold text-base tracking-tight">{activeRecording?.label ?? '加载中…'}</div>
           {chat ? (
@@ -1212,49 +1323,64 @@ export default function Viewer(): React.ReactElement {
             QCE Viewer powered by <span className="italic">HyperScroll</span>
           </a>
         </div>
+        </div>
       </aside>
 
-      {sidebarOpen ? (
-        <button
-          type="button"
-          aria-label="关闭侧栏"
-          className="absolute inset-0 z-20 bg-background/60 md:hidden"
-          onClick={() => setSidebarOpen(false)}
-        />
-      ) : null}
+      <button
+        type="button"
+        aria-label="关闭侧栏"
+        className="qce-log-sidebar-overlay absolute inset-0 z-20 bg-black/20 md:hidden"
+        disabled={sidebarOnDesktop || !sidebarExpanded}
+        tabIndex={-1}
+        onClick={() => setSidebarOpen(false)}
+      />
 
       {/* Main */}
-      <div className="relative flex min-w-0 flex-1 flex-col">
+      <div className="qce-log-main relative flex min-w-0 flex-1 flex-col">
         <header className="qce-log-top">
-          <Button variant="ghost" size="icon-sm" aria-label="切换侧栏" aria-controls="qce-viewer-sidebar" onClick={() => {
-            if (window.matchMedia('(min-width: 768px)').matches) setSidebarCollapsed(value => !value);
-            else setSidebarOpen(value => !value);
+          <Button className="qce-log-chrome" variant="ghost" size="icon-sm" aria-label="切换侧栏" aria-controls="qce-viewer-sidebar" aria-expanded={sidebarExpanded} onClick={() => {
+            if (sidebarOnDesktop) {
+              preserveReadingPosition();
+              setSidebarCollapsed(value => !value);
+            } else setSidebarOpen(value => !value);
           }}><PanelLeftIcon /></Button>
-          <span className={`qce-log-title${sidebarCollapsed ? '' : ' md:hidden'}`}>{label}</span>
-          {manifest && <span className="qce-log-count" aria-live="polite">已审 {reviewedCount.toLocaleString()} / {manifest.stats.totalMessages.toLocaleString()}</span>}
-          <select className="qce-log-layout rounded border px-1.5 py-1 text-xs" aria-label="分屏布局" value={layout}
+          <span className="qce-log-title" aria-hidden={sidebarOnDesktop && sidebarExpanded}>{label}</span>
+          {manifest && <span className="qce-log-count qce-log-chrome" aria-live="polite">已审 {reviewedCount.toLocaleString()} / {reviewTotal.toLocaleString()}</span>}
+          <select className="qce-log-layout qce-log-chrome rounded border px-1.5 py-1 text-xs" aria-label="分屏布局" value={layout}
             onChange={event => {
               if (layout === 'single' && activeRecording) setCompareKey(recordings.find(item => item.key !== activeRecording.key)?.key ?? activeRecording.key);
+              if (event.currentTarget.value === 'single') activateReviewPane('main');
               setLayout(event.currentTarget.value as typeof layout);
             }}>
             <option value="single">单窗</option>
             <option value="horizontal">左右分屏</option>
             <option value="vertical">上下分屏</option>
           </select>
-          <Button variant="outline" size="sm" disabled={review.busy || (!review.draft && !canDraft)} onClick={() => review.draft ? review.setDraft(null) : void review.showDraft(recordings, draftTitle)}>成稿</Button>
+          <Button className="qce-log-chrome" variant="outline" size="sm" disabled={review.busy || !canDraft}
+            aria-pressed={draftOpen && draftMode === 'preview'}
+            onClick={() => draftOpen && draftMode === 'preview' ? closeDraft() : openDraft('preview')}>成稿预览</Button>
+          <Button className="qce-log-chrome" variant="outline" size="sm" disabled={review.busy || !canDraft}
+            aria-haspopup="dialog" onClick={() => openDraft('full')}>完整成稿</Button>
+          <Button variant={flowMode ? 'secondary' : 'ghost'} size="sm" aria-pressed={flowMode} onClick={toggleFlowMode}>
+            {flowMode ? '退出心流' : '心流'}
+          </Button>
         </header>
 
         <div className={`qce-log-panes qce-log-panes-${layout}`}>
-        <div className="relative min-h-0 min-w-0">
+        <div className="qce-log-reading relative min-h-0 min-w-0">
           <div className="pointer-events-none absolute inset-x-0 top-0 z-10 h-6 bg-gradient-to-b from-background to-transparent" />
           <div
             id="viewport"
             ref={viewportRef}
-            className={`qce-viewport h-full${review.rangeMode ? ' qce-log-range' : ''}`}
+            className={`qce-viewport h-full${review.rangeMode && reviewPane === 'main' ? ' qce-log-range' : ''}`}
             tabIndex={0}
-            onClick={onViewportClick}
-            onKeyDown={onViewportKeyDown}
-            onPointerDown={review.pointerDown}
+            onFocus={() => activateReviewPane('main')}
+            onClick={event => onViewportClick(event)}
+            onKeyDown={event => onViewportKeyDown(event)}
+            onPointerDown={event => {
+              if (event.button === 0) activateReviewPane('main');
+              review.pointerDown(event);
+            }}
             onPointerMove={review.pointerMove}
             onPointerUp={review.pointerEnd}
             onPointerCancel={review.pointerEnd}
@@ -1276,8 +1402,15 @@ export default function Viewer(): React.ReactElement {
           ) : null}
         </div>
         {layout !== 'single' && comparison && <LogCompare recordings={recordings} recording={comparison}
-          progress={review.recordingProgress(comparison.store.manifest, comparison.initial)}
-          onChoose={setCompareKey} onOpen={index => openRecording(comparison.key, index)} onClick={onViewportClick}
+          engine={compareEngineRef} view={compareViewportRef}
+          decorate={(index, row, html) => review.decorate(index, row, html, comparison.store.manifest, reviewTarget.current === compareTarget)}
+          rangeMode={review.rangeMode && reviewPane === 'compare'}
+          onChoose={key => {
+            if (reviewPane === 'compare') activateReviewPane('compare', recordings.find(recording => recording.key === key));
+            setCompareKey(key);
+          }} onOpen={index => openRecording(comparison.key, index)} onClick={onViewportClick}
+          onActivate={() => activateReviewPane('compare')} onSelect={review.selectRow} onKeyDown={onViewportKeyDown}
+          onPointerDown={review.pointerDown} onPointerMove={review.pointerMove} onPointerEnd={review.pointerEnd}
           findMessage={id => findMessageIndex(comparison.store, id)} />}
         </div>
         {review.edit && <form className="qce-log-edit" onSubmit={event => {
@@ -1301,9 +1434,12 @@ export default function Viewer(): React.ReactElement {
         </form>}
         {!review.edit && <footer className="qce-log-tools">
           <div className="qce-log-tool-group">
-            <Button size="sm" disabled={review.busy || !stats?.totalMessages} onClick={() => review.decide('keep')}>保留 <kbd>A</kbd></Button>
-            <Button size="sm" variant="outline" disabled={review.busy || !stats?.totalMessages} onClick={() => review.decide('exclude')}>排除 <kbd>S</kbd></Button>
-            <Button size="sm" variant="outline" disabled={review.busy || !stats?.totalMessages} onClick={() => void review.beginEdit()}>编辑 <kbd>E</kbd></Button>
+            {layout !== 'single' && <span className="qce-log-active-pane" aria-live="polite">审阅{reviewPane === 'compare' ? '对照窗' : '主窗'}</span>}
+            <Button size="sm" disabled={review.busy || !reviewTotal} onClick={() => review.decide('keep')}>保留 <kbd>A</kbd></Button>
+            <Button size="sm" variant="outline" disabled={review.busy || !reviewTotal} onClick={() => review.decide('exclude')}>
+              {review.selected.size > 0 ? '排除所选' : '排除'} <kbd>S</kbd>
+            </Button>
+            <Button size="sm" variant="outline" disabled={review.busy || !reviewTotal} onClick={() => void review.beginEdit()}>编辑 <kbd>E</kbd></Button>
             <Button size="sm" variant="ghost" disabled={!review.canUndo || review.busy} onClick={review.undo}>撤销</Button>
           </div>
           <div className="qce-log-tool-group">
@@ -1318,7 +1454,15 @@ export default function Viewer(): React.ReactElement {
           </div>
         </footer>}
         {review.status && <p className="qce-log-status" role="status">{review.status}</p>}
-        {review.draft && <LogDraft draft={review.draft} onEdit={(entry, text) => {
+        {review.draft && <LogDraft draft={review.draft} full={draftMode === 'full'} onOpenFull={() => openDraft('full')}
+          canUndoDelete={lastDraftDeletion.length > 0}
+          onDelete={entries => {
+            const removed = review.setDraftDecisions(recordings, entries, 'exclude');
+            if (removed.length) setLastDraftDeletion(removed);
+          }} onUndoDelete={() => {
+            review.setDraftDecisions(recordings, lastDraftDeletion, 'keep');
+            setLastDraftDeletion([]);
+          }} onEdit={(entry, text) => {
           const recording = recordings.find(item => item.key === entry.key);
           if (recording) review.editDraft(recording, entry, text);
         }} onLink={entries => {
@@ -1327,7 +1471,7 @@ export default function Viewer(): React.ReactElement {
         }} onUnlink={entry => {
           const recording = recordings.find(item => item.key === entry.key);
           if (recording && entry.exchange !== undefined) review.unlinkDraftExchange(recording, entry.exchange);
-        }} onExport={format => void review.showDraft(recordings, draftTitle, format)} onClose={() => review.setDraft(null)} />}
+        }} onExport={format => void review.showDraft(recordings, draftTitle, format)} onClose={closeDraft} />}
       </div>
 
       <MediaPreview item={preview} onClose={() => setPreview(null)} />

@@ -15,6 +15,7 @@ const SEEK_IDLE_MS = 90;
 const SEEK_OVERSCAN_PX = 400;
 const SEEK_MIN_ITEMS = 8;
 const SEEK_MAX_ITEMS = 48;
+const RESIZE_SETTLE_MS = 90;
  
 let styleInjected = false;
 function injectBaseStyle(doc: Document): void {
@@ -66,10 +67,11 @@ export class HyperScroll {
   private pendingSeekIndex = -1;
   private nativeSeekActive = false;
   private seekSettleTimer: ReturnType<typeof setTimeout> | null = null;
+  private resizeSettleTimer: ReturnType<typeof setTimeout> | null = null;
   private touchY: number | null = null;
   private touchVel = 0;
   private touchLastT = 0;
-  private pinnedJump: { index: number; top: number } | null = null;
+  private pinnedJump: { index: number; top: number | null } | null = null;
   private destroyed = false;
   private readonly resizeObserver: ResizeObserver | null;
   private readonly listResizeObserver: ResizeObserver | null;
@@ -116,11 +118,11 @@ export class HyperScroll {
     container.addEventListener('touchmove', this.onTouchMove, { passive: false, signal });
     container.addEventListener('touchend', this.onTouchEnd, { passive: true, signal });
     if (this.opts.keyboard) {
-      doc.defaultView?.addEventListener('keydown', this.onKeyDown, { signal });
+      container.addEventListener('keydown', this.onKeyDown, { signal });
     }
     this.resizeObserver = typeof ResizeObserver === 'undefined'
       ? null
-      : new ResizeObserver(() => this.rebuild());
+      : new ResizeObserver(this.onViewportResize);
     this.resizeObserver?.observe(container);
     this.listResizeObserver = typeof ResizeObserver === 'undefined'
       ? null
@@ -134,7 +136,17 @@ export class HyperScroll {
  
   /** Jump so that item `index` is at the viewport top (+`offset` px). */
   scrollToIndex(index: number, offset = 0): void {
+    this.pinIndex(index, -offset);
+  }
+
+  /** Keep the selected item near the viewport center as its size changes. */
+  centerOnIndex(index: number): void {
+    this.pinIndex(index, null);
+  }
+
+  private pinIndex(index: number, top: number | null): void {
     const count = this.opts.dataSource.count;
+    const wasSeeking = this.nativeSeekActive;
     this.cancelNativeSeek();
     // Drop any in-flight wheel momentum: letting it keep draining after a
     // jump drags the viewport away from the target.
@@ -142,8 +154,13 @@ export class HyperScroll {
     this.smoothVel = 0;
     const targetIndex = Math.min(Math.max(index, 0), Math.max(count - 1, 0));
     this.anchor = { index: targetIndex, offset: 0 };
-    this.pinnedJump = { index: targetIndex, top: -offset };
-    this.rebuild();
+    this.pinnedJump = { index: targetIndex, top };
+    const end = this.range.end;
+    if (top === null && !wasSeeking && targetIndex >= this.range.start && targetIndex < end
+      && (end >= count || targetIndex < end - 12)) {
+      this.ensureAnchorLayout();
+      this.positionPinnedJump();
+    } else this.rebuild();
   }
  
   /** Scroll by a pixel delta along the precise (anchor) path. */
@@ -185,6 +202,20 @@ export class HyperScroll {
       lastRebuildMs: this.lastRebuildMs,
     };
   }
+
+  /** Preserve the message currently visible before its viewport changes size. */
+  syncAnchorToViewport(): void {
+    if (this.pinnedJump || this.nativeSeekActive) return;
+    const top = this.viewport.getBoundingClientRect().top;
+    const rows = this.list.children;
+    for (let i = 0; i < rows.length; i++) {
+      const box = rows[i]!.getBoundingClientRect();
+      if (box.bottom > top) {
+        this.anchor = { index: this.range.start + i, offset: Math.max(0, top - box.top) };
+        return;
+      }
+    }
+  }
  
   destroy(): void {
     if (this.destroyed) return;
@@ -194,6 +225,7 @@ export class HyperScroll {
     if (this.scrollSyncReleaseTimer !== null) {
       clearTimeout(this.scrollSyncReleaseTimer);
     }
+    if (this.resizeSettleTimer !== null) clearTimeout(this.resizeSettleTimer);
     this.resizeObserver?.disconnect();
     this.listResizeObserver?.disconnect();
     this.layer.remove();
@@ -341,7 +373,7 @@ export class HyperScroll {
   };
  
   private readonly onKeyDown = (e: KeyboardEvent): void => {
-    if ((e.target as HTMLElement | null)?.tagName === 'INPUT') return;
+    if (e.defaultPrevented || e.target !== this.viewport) return;
     const vh = this.viewport.clientHeight;
     const count = this.opts.dataSource.count;
     switch (e.key) {
@@ -357,6 +389,20 @@ export class HyperScroll {
   };
  
   // ------------------------------------------------------------- rendering
+
+  private readonly onViewportResize = (): void => {
+    if (this.destroyed || this.nativeSeekActive) return;
+    // Keep the mounted bubbles and scroll anchor during a live resize. A full
+    // rebuild after settling restores the render window around the new size.
+    if (this.resizeSettleTimer === null) this.ensureAnchorLayout();
+    if (this.pinnedJump) this.positionPinnedJump();
+    else this.position(true);
+    if (this.resizeSettleTimer !== null) clearTimeout(this.resizeSettleTimer);
+    this.resizeSettleTimer = setTimeout(() => {
+      this.resizeSettleTimer = null;
+      if (!this.nativeSeekActive) this.rebuild(true);
+    }, RESIZE_SETTLE_MS);
+  };
  
   private scheduleFrame(): void {
     if (this.framePending || this.destroyed) return;
@@ -408,8 +454,11 @@ export class HyperScroll {
     const pinned = this.pinnedJump;
     if (!pinned) return;
     this.pinnedJump = null;
+    const row = this.list.children[pinned.index - this.range.start];
+    const offset = pinned.top !== null ? -pinned.top
+      : row ? this.viewport.getBoundingClientRect().top - row.getBoundingClientRect().top : 0;
     this.anchor = normalizeAnchor(
-      { index: pinned.index, offset: -pinned.top },
+      { index: pinned.index, offset },
       this.opts.dataSource.count,
       this.heightAt,
     );
@@ -469,8 +518,18 @@ export class HyperScroll {
     }
     return this.opts.dataSource.estimateHeight?.(index) ?? this.heights.get(index);
   };
+
+  private ensureAnchorLayout(): void {
+    // Offscreen rows with content-visibility:auto may report intrinsic-size
+    // estimates. Their real heights are needed to place the same anchor.
+    const children = this.list.children;
+    const last = Math.min(this.anchor.index - this.range.start, children.length - 1);
+    for (let i = 0; i <= last; i++) {
+      (children[i] as HTMLElement).style.contentVisibility = 'visible';
+    }
+  }
  
-  private rebuild(): void {
+  private rebuild(keepAnchor = false): void {
     if (this.destroyed) return;
     const t0 = performance.now();
     const src = this.opts.dataSource;
@@ -499,17 +558,7 @@ export class HyperScroll {
       this.range = { start, end };
     }
  
-    // Force exact layout on the anchor and everything above it: offscreen
-    // `content-visibility:auto` items only report their intrinsic-size
-    // estimate, which would corrupt the anchor's offsetTop (and thus the
-    // translate) until they happen to get painted.
-    {
-      const children = this.list.children;
-      const upTo = Math.min(this.anchor.index - start, children.length - 1);
-      for (let i = 0; i <= upTo; i++) {
-        (children[i] as HTMLElement).style.contentVisibility = 'visible';
-      }
-    }
+    this.ensureAnchorLayout();
 
     // When the window reaches the data end, force exact layout on the tail
     // stretch: offscreen `content-visibility:auto` items only report their
@@ -527,7 +576,7 @@ export class HyperScroll {
     if (this.pinnedJump) {
       this.positionPinnedJump();
     } else {
-      this.position();
+      this.position(keepAnchor);
     }
   }
  
@@ -587,7 +636,7 @@ export class HyperScroll {
     this.opts.onRangeChange?.({ ...this.range }, this.lastRebuildMs);
   }
 
-  private position(): void {
+  private position(keepAnchor = false): void {
     if (this.destroyed) return;
     const count = this.opts.dataSource.count;
     if (count === 0) {
@@ -595,7 +644,12 @@ export class HyperScroll {
       this.list.style.transform = '';
       return;
     }
-    const before = this.anchor;
+    // A narrower or wider message may wrap to a different height. Keep the
+    // same row instead of carrying an offset that now belongs to later rows.
+    const before = keepAnchor ? {
+      ...this.anchor,
+      offset: Math.min(this.anchor.offset, Math.max(0, this.heightAt(this.anchor.index) - 8)),
+    } : this.anchor;
     const normalized = normalizeAnchor(before, count, this.heightAt);
     this.anchor = normalized;
  
@@ -655,7 +709,13 @@ export class HyperScroll {
     }
     const target = this.list.children[pinned.index - this.range.start] as HTMLElement | undefined;
     if (!target) return;
-    const translate = target.offsetTop - pinned.top;
+    let translate = target.offsetTop - (pinned.top ?? Math.max(8, (this.viewport.clientHeight - target.offsetHeight) / 2));
+    if (pinned.top === null) {
+      translate = Math.max(0, translate);
+      if (this.range.end >= this.opts.dataSource.count) {
+        translate = Math.min(translate, Math.max(0, this.list.offsetHeight - this.viewport.clientHeight));
+      }
+    }
     this.anchor = { index: pinned.index, offset: 0 };
     this.list.style.transform = `translateY(${-Math.round(translate)}px)`;
     this.syncScrollbar();

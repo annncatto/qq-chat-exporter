@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
-test.use({ video: 'off', colorScheme: 'light' });
+test.use({ video: 'off', colorScheme: 'light', reducedMotion: 'no-preference' });
 
 for (const inline of [true, false]) {
   test(`${inline ? 'single-file' : 'chunked'} HTML opens with native reading and Log review on one page`, async ({ page }) => {
@@ -46,6 +46,56 @@ for (const inline of [true, false]) {
       await page.goto(pathToFileURL(index).href);
       const viewport = page.locator('#viewport');
       await expect(viewport.locator('#msg-2')).toBeVisible();
+      const sidebar = page.locator('#qce-viewer-sidebar');
+      const sidebarToggle = page.getByRole('button', { name: '切换侧栏' });
+      await expect(sidebarToggle).toHaveAttribute('aria-expanded', 'true');
+      const transition = await sidebar.evaluate(async element => {
+        const before = element.getBoundingClientRect().width;
+        document.querySelector<HTMLButtonElement>('button[aria-controls="qce-viewer-sidebar"]')!.click();
+        let during = before;
+        for (let frame = 0; frame < 12 && during === before; frame++) {
+          await new Promise<void>(resolve => requestAnimationFrame(() => resolve()));
+          during = element.getBoundingClientRect().width;
+        }
+        return { before, during };
+      });
+      expect(transition.before).toBe(248);
+      expect(transition.during).toBeGreaterThan(0);
+      expect(transition.during).toBeLessThan(transition.before);
+      await expect(sidebar).toHaveCSS('width', '0px');
+      await sidebarToggle.click();
+      await expect(sidebar).toHaveCSS('width', `${transition.before}px`);
+
+      const layout = page.getByRole('combobox', { name: '分屏布局' });
+      await layout.selectOption('horizontal');
+      const compareMessages = page.getByLabel('对照消息');
+      await expect(compareMessages.locator('[data-i="1"] .content')).toBeVisible();
+      // Let HyperScroll settle the initial resize before testing row selection.
+      await page.waitForTimeout(160);
+      const leftRow = await viewport.locator('[data-i="0"]').elementHandle();
+      await compareMessages.locator('[data-i="1"] .content').click();
+      await expect(compareMessages.locator('.qce-log-current')).toHaveAttribute('data-i', '1');
+      expect(await leftRow!.evaluate(row => row.isConnected)).toBe(true);
+      const rightRow = await compareMessages.locator('[data-i="1"]').elementHandle();
+      await viewport.locator('#msg-0 .content').click();
+      await expect(viewport.locator('.qce-log-current')).toHaveAttribute('data-i', '0');
+      await expect(compareMessages.locator('.qce-log-current')).toHaveCount(0);
+      expect(await rightRow!.evaluate(row => row.isConnected)).toBe(true);
+      await page.locator('.qce-log-shell').evaluate(element => {
+        element.requestFullscreen = () => Promise.reject(new Error('fullscreen unavailable'));
+      });
+      await page.getByRole('button', { name: '心流', exact: true }).click();
+      await expect(sidebar).toHaveCSS('width', '0px');
+      await expect(layout).toBeHidden();
+      await expect(page.getByRole('region', { name: '对照窗' })).toBeVisible();
+      await expect(page.getByRole('button', { name: '保留 A', exact: true })).toBeVisible();
+      await expect(viewport).toBeFocused();
+      await page.keyboard.press('Escape');
+      await expect(page.getByRole('button', { name: '心流', exact: true })).toBeVisible();
+      await expect(sidebar).toHaveCSS('width', `${transition.before}px`);
+      await expect(layout).toHaveValue('horizontal');
+      await layout.selectOption('single');
+
       await expect(page.getByRole('button', { name: '搜索', exact: true })).toHaveCSS('background-color', 'rgb(39, 81, 211)');
       const bubbleColor = await viewport.locator('#msg-0 .message-bubble').evaluate(node => getComputedStyle(node).backgroundColor);
       await expect(viewport.locator('#msg-1 .message-bubble')).toHaveCSS('background-color', bubbleColor);
@@ -113,8 +163,23 @@ for (const inline of [true, false]) {
       const project = JSON.parse(await readFile(backup, 'utf8'));
       expect(project.progress.decisions).toEqual({ 0: 'keep', 1: 'keep', 2: 'exclude' });
       expect(project.progress.chapters).toEqual({ 0: '第一回合', 1: '第一回合' });
-      await page.getByRole('button', { name: '成稿', exact: true }).click();
+      await page.getByRole('button', { name: '完整成稿', exact: true }).click();
+      const fullDraft = page.getByRole('dialog', { name: '完整成稿' });
+      await expect(fullDraft).toBeVisible();
+      await fullDraft.getByRole('button', { name: '门打开了。', exact: true }).click();
+      const draftText = fullDraft.getByRole('textbox', { name: '成稿正文' });
+      await draftText.fill('门打开了。补记。');
+      await fullDraft.getByRole('button', { name: '保存', exact: true }).click();
+      await fullDraft.getByRole('button', { name: '返回', exact: true }).click();
+      await expect(fullDraft).toHaveCount(0);
+      await page.getByRole('button', { name: '成稿预览', exact: true }).click();
       const draft = page.getByRole('complementary', { name: '成稿预览' });
+      await expect(draft).toContainText('门打开了。补记。');
+      await draft.getByRole('button', { name: '完整成稿', exact: true }).click();
+      await fullDraft.getByRole('button', { name: '门打开了。补记。', exact: true }).click();
+      await draftText.fill('门打开了。');
+      await fullDraft.getByRole('button', { name: '保存', exact: true }).click();
+      await fullDraft.getByRole('button', { name: '返回', exact: true }).click();
       await expect(draft).toContainText('【KP】');
       await expect(draft).toContainText('门打开了。');
       await expect(draft).not.toContainText('Third line');
@@ -169,10 +234,24 @@ for (const inline of [true, false]) {
       await page.getByLabel('分屏布局').selectOption('vertical');
       expect((await compare.boundingBox())!.y).toBeGreaterThan((await viewport.boundingBox())!.y);
       await compare.getByText('Before opening the door').click();
-      await expect(viewport.getByText('Before opening the door')).toBeVisible();
+      await expect(page.getByText('审阅对照窗')).toBeVisible();
+      await expect(compare.locator('.qce-log-current')).toHaveAttribute('data-i', '0');
+      await expect(viewport.getByText('Before opening the door')).toHaveCount(0);
+      await expect(viewport.locator('#msg-0')).toBeVisible();
+      await page.keyboard.press('s');
+      await expect(compare.getByText('已排除', { exact: true })).toBeVisible();
+      await page.keyboard.press('Control+z');
+      await expect(compare.getByText('已排除', { exact: true })).toHaveCount(0);
+      await page.keyboard.press('e');
+      await expect(page.locator('#qce-log-edit-text')).toHaveValue('Before opening the door');
+      await page.locator('#qce-log-edit-text').press('Control+Enter');
+      await expect(compare.locator('.qce-log-kept')).toBeVisible();
+      await viewport.locator('#msg-0 .content').click();
+      await expect(page.getByText('审阅主窗')).toBeVisible();
+      await expect(viewport.locator('.qce-log-current')).toHaveAttribute('data-i', '0');
+      await expect(compare.locator('.qce-log-kept')).toBeVisible();
       await page.getByLabel('分屏布局').selectOption('single');
-      await page.getByRole('button', { name: '保留 A', exact: true }).click();
-      await page.getByRole('button', { name: '成稿', exact: true }).click();
+      await page.getByRole('button', { name: '成稿预览', exact: true }).click();
       await expect(draft).toContainText('Before opening the door');
       await expect(draft).toContainText('门打开了。');
       const included = page.getByRole('checkbox', { name: '将 补充记录 纳入成稿' });
@@ -206,21 +285,133 @@ for (const inline of [true, false]) {
       expect(groupedText.indexOf('门打开了。')).toBeLessThan(groupedText.indexOf('Second line'));
       expect(groupedText.indexOf('Second line')).toBeLessThan(groupedText.indexOf('Before opening the door'));
       await page.reload();
-      await page.getByRole('button', { name: '成稿', exact: true }).click();
+      await page.getByRole('button', { name: '成稿预览', exact: true }).click();
       await expect(draft.getByRole('button', { name: '拆开此段', exact: true })).toBeVisible();
       await draft.getByRole('button', { name: '拆开此段', exact: true }).click();
       await expect(draft.getByRole('button', { name: '拆开此段', exact: true })).toHaveCount(0);
       await expect(draft.locator('article .qce-log-manuscript-line')).toHaveText([
         '门打开了。', 'Before opening the door', 'Second line',
       ]);
+      const importedEntry = draft.locator('article').filter({ hasText: 'Before opening the door' });
+      const deleteEntry = importedEntry.getByRole('button', { name: '删除', exact: true });
+      await expect(deleteEntry).toHaveCSS('opacity', '0');
+      await importedEntry.hover();
+      await expect(deleteEntry).toHaveCSS('opacity', '0');
+      await expect(deleteEntry).toHaveCSS('opacity', '1');
+      await deleteEntry.click();
+      await expect(importedEntry).toHaveCount(0);
+      await draft.getByRole('button', { name: '撤销删除', exact: true }).click();
+      await expect(importedEntry).toBeVisible();
+
+      await draft.getByRole('button', { name: '完整成稿', exact: true }).click();
+      await fullDraft.getByRole('button', { name: '批量删除', exact: true }).click();
+      await fullDraft.getByRole('button', { name: '门打开了。', exact: true }).click();
+      await fullDraft.getByRole('button', { name: 'Second line', exact: true }).click({ modifiers: ['Shift'] });
+      await expect(fullDraft.getByText('已选 3 条')).toBeVisible();
+      await fullDraft.getByRole('button', { name: '删除所选', exact: true }).click();
+      await expect(fullDraft.getByText('暂无成稿消息。')).toBeVisible();
+      await expect(fullDraft.getByRole('button', { name: 'HTML', exact: true })).toBeDisabled();
+      await fullDraft.getByRole('button', { name: '撤销删除', exact: true }).click();
+      await expect(fullDraft.locator('article .qce-log-manuscript-line')).toHaveText([
+        '门打开了。', 'Before opening the door', 'Second line',
+      ]);
+      await fullDraft.getByRole('button', { name: '返回', exact: true }).click();
       await draft.getByRole('button', { name: '关闭', exact: true }).click();
       await page.getByText('记录管理', { exact: true }).click();
       await expect(page.getByRole('button', { name: '补充记录', exact: true })).toBeVisible();
       await page.getByRole('button', { name: '补充记录', exact: true }).click();
-      await expect(viewport.getByText('Before opening the door')).toBeVisible();
+      await expect(viewport.locator('.qce-log-edited')).toHaveText('Before opening the door');
       await expect(page.getByText('已审 1 / 1')).toBeVisible();
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
   });
 }
+
+test('review follows the next row and can exclude a range in one action', async ({ page }) => {
+  const dir = await mkdtemp(join(tmpdir(), 'qce-review-follow-'));
+  try {
+    const source = join(__dirname, '../../qce-chunked-viewer/assets/modern_chunked_app.js');
+    const rows = Array.from({ length: 22 }, (_, i) => ({
+      id: `follow-${i}`, ts: 1760000000000 + i * 1000, date: '2025-10-09', uid: 'keeper',
+      name: '主持人', nameLower: '主持人', text: `阅览 ${i + 1}`, logText: `阅览 ${i + 1}`,
+      html: `<div class="message" id="follow-${i}" style="height:${80 + (i % 3) * 14}px"><span class="content">阅览 ${i + 1}</span></div>`,
+    }));
+    const data = Array.from({ length: 4 }, (_, i) => rows.slice(i * 6, (i + 1) * 6));
+    const chunks = data.map((messages, i) => ({
+      id: String(i), file: `data/chunk-${i}.js`, count: messages.length, bytes: 1024,
+      startTs: messages[0]!.ts, endTs: messages.at(-1)!.ts, startDate: '2025-10-09', endDate: '2025-10-09',
+      firstMsgId: messages[0]!.id, lastMsgId: messages.at(-1)!.id, textBloom: '', senderBloom: '',
+    }));
+    const manifest = {
+      format: 'qce-modern-html-chunked', version: 1, exportTime: '2026-11-20T10:00:00+09:00',
+      chat: { name: '连续审阅测试', type: 'group' }, stats: { totalMessages: rows.length, minDateKey: '2025-10-09', maxDateKey: '2025-10-09' },
+      chunking: { maxMessagesPerChunk: 6 }, bloom: { textBits: 0, textHashes: 0, senderBits: 0, senderHashes: 0 },
+      senders: [{ uid: 'keeper', displayName: '主持人', count: rows.length }], chunks,
+    };
+    const inline = { manifest, chunks: Object.fromEntries(data.map((messages, i) => [String(i), messages])), msgid: {} };
+    await copyFile(source, join(dir, 'app.js'));
+    const index = join(dir, 'index.html');
+    await writeFile(index, `<!doctype html><meta charset="utf-8"><div id="root"></div><script>window.__QCE_INLINE__=${JSON.stringify(inline)}</script><script src="app.js" defer></script>`);
+    await page.setViewportSize({ width: 1280, height: 560 });
+    await page.route('https://**', route => route.abort());
+    await page.goto(pathToFileURL(index).href);
+    await page.getByLabel('分屏布局').selectOption('horizontal');
+    const right = page.getByLabel('对照消息');
+    const leftFirst = page.locator('#viewport [data-i="0"]');
+    await right.locator('[data-i="0"] .content').click();
+    const leftTop = (await leftFirst.boundingBox())!.y;
+    const cursor = right.locator('.qce-log-current');
+    for (let i = 1; i < rows.length; i++) {
+      await page.keyboard.press('a');
+      await expect(cursor).toHaveAttribute('data-i', String(i));
+      await expect(cursor).toBeInViewport();
+      if (i === 9) {
+        const bounds = (await right.boundingBox())!;
+        const box = (await cursor.boundingBox())!;
+        expect(Math.abs(box.y + box.height / 2 - (bounds.y + bounds.height / 2))).toBeLessThan(2);
+      }
+    }
+    await page.keyboard.press('a');
+    await expect(page.getByText('已到当前列表末尾。')).toBeVisible();
+    await page.keyboard.press('a');
+    await expect(cursor).toHaveAttribute('data-i', String(rows.length - 1));
+    await expect(cursor).toBeInViewport();
+    expect((await leftFirst.boundingBox())!.y).toBeCloseTo(leftTop);
+
+    async function selectFirstThree() {
+      await right.focus();
+      await page.keyboard.press('Home');
+      const first = right.locator('[data-i="0"] .content');
+      const third = right.locator('[data-i="2"] .content');
+      await expect(first).toBeInViewport();
+      await expect(third).toBeInViewport();
+      const from = (await first.boundingBox())!;
+      const to = (await third.boundingBox())!;
+      await page.mouse.move(from.x + 5, from.y + 5);
+      await page.mouse.down();
+      await page.mouse.move(to.x + 5, to.y + 5, { steps: 8 });
+      await page.mouse.up();
+      await expect(page.getByText('已选 3 条')).toBeVisible();
+    }
+
+    await selectFirstThree();
+    await page.getByRole('button', { name: '排除所选 S', exact: true }).click();
+    await expect(page.getByText('已排除 3 条消息。')).toBeVisible();
+    await expect(right.getByText('已排除', { exact: true })).toHaveCount(3);
+    await expect(right.getByText('阅览 1', { exact: true })).toBeVisible();
+    await page.getByRole('button', { name: '完整成稿', exact: true }).click();
+    const draft = page.getByRole('dialog', { name: '完整成稿' });
+    await expect(draft.getByRole('button', { name: '阅览 1', exact: true })).toHaveCount(0);
+    await expect(draft.getByRole('button', { name: '阅览 4', exact: true })).toBeVisible();
+    await draft.getByRole('button', { name: '返回', exact: true }).click();
+    await page.getByRole('button', { name: '撤销', exact: true }).click();
+    await expect(right.getByText('已排除', { exact: true })).toHaveCount(0);
+
+    await selectFirstThree();
+    await page.keyboard.press('s');
+    await expect(right.getByText('已排除', { exact: true })).toHaveCount(3);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});

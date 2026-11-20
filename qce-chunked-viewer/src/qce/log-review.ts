@@ -177,11 +177,17 @@ export async function loadReviewRecord(store: ChunkStore, index: number): Promis
   return row;
 }
 
-export async function makeReviewProject(title: string, inputs: DraftInput[]): Promise<ReviewDraft> {
+export async function makeReviewProject(title: string, inputs: DraftInput[], allowEmpty = false): Promise<ReviewDraft> {
   const selected = inputs.flatMap(input => Object.keys(input.progress.decisions).map(Number)
     .filter(index => input.progress.decisions[index] === 'keep').sort((a, b) => a - b)
     .map(index => ({ input, index })));
-  if (!selected.length) throw new Error('请先保留要写入成稿的消息。');
+  if (!selected.length) {
+    if (!allowEmpty) throw new Error('请先保留要写入成稿的消息。');
+    return {
+      project: { title, windows: [], people: [], messages: [], state: { decisions: [], edits: {}, rounds: {}, sections: [], current: null } },
+      entries: [],
+    };
+  }
   if (selected.length > 200000) throw new Error('成稿最多可包含 20 万条消息。');
   const rows: DraftRow[] = [];
   let loadedStore: ChunkStore | undefined;
