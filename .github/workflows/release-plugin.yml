@@ -20,9 +20,9 @@ jobs:
       shell_url: ${{ steps.log_source.outputs.shell_url }}
       shell_sha256: ${{ steps.log_source.outputs.shell_sha256 }}
     steps:
-      - name: "固定跑团版的 NapCat Shell 来源"
+      - name: "固定 NapCat Shell 来源"
         id: log_source
-        if: github.repository == 'annncatto/qq-chat-exporter' && contains(github.ref_name, '-log.')
+        if: github.repository == 'annncatto/qq-chat-exporter-log' && contains(github.ref_name, '-log.')
         run: |
           # NapCat 上游已撤下发行包。归档包须与原发布记录的 SHA-256 一致。
           {
@@ -867,7 +867,7 @@ jobs:
           echo "========================================="
 
   publish-log-release:
-    if: github.repository == 'annncatto/qq-chat-exporter' && github.ref_type == 'tag' && contains(github.ref_name, '-log.')
+    if: github.repository == 'annncatto/qq-chat-exporter-log' && github.ref_type == 'tag' && contains(github.ref_name, '-log.')
     needs: [build-shell-packages, build-installer-package]
     runs-on: ubuntu-latest
     permissions:

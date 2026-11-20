@@ -4,7 +4,7 @@
 
 它不仅可以导出 HTML、JSON、TXT 和 Excel 等各种你需要的格式，还可以将聊天中发过的图片、视频和表情文件一并下载到本地保存。最最最重要的是，所有读取和解析都在你自己的电脑上完成，项目没有服务器或数据传输，绝对不会把你的聊天记录上传到任何地方。
 
-**[下载跑团版][log-releases-link]** **[使用文档][docs-link]** **[Docker 部署][docker-doc]** **[反馈问题][issues-link]**
+**[下载][releases-link]** **[使用文档][docs-link]** **[Docker 部署][docker-doc]** **[反馈问题][issues-link]**
 
 [![][github-release-shield]][releases-link]
 [![][github-downloads-shield]][releases-link]
@@ -27,19 +27,19 @@
 
 ## 快速开始
 
-从 [跑团版 Releases][log-releases-link] 下载适合当前系统的安装包或 Shell 包。打开 QCE 后，从侧栏进入[跑团工作台](#跑团工作台)。
+从 [Releases][releases-link] 下载适合当前系统的安装包或 Shell 包。
 
 ### Windows 一键安装（推荐）
 
-1. 下载 `QQChatExporter-Installer-*-log.*.exe` 并运行
+1. 下载 `QQChatExporter-Installer-*.exe` 并运行
 2. 用 QQ 扫码登录
-3. 打开 `http://localhost:40653/qce`，进入「跑团工作台」
+3. 打开 `http://localhost:40653/qce`，选择会话并导出记录
 
 ### Shell 模式（Windows / Linux / macOS Apple Silicon 预览）
 
-1. 下载并解压适合自己平台的跑团版 Shell 包。Windows x64 使用 `.zip`，Linux x64 和 macOS Apple Silicon 使用各自的 `.tar.gz`
+1. 下载并解压对应平台的 Shell 包。Windows x64 使用 `.zip`，Linux x64 和 macOS Apple Silicon 使用各自的 `.tar.gz`
 2. 运行 `launcher-user.bat`（Windows）或 `./launcher-user.sh`（Linux / macOS）
-3. 用 QQ 扫码登录，打开控制台打印的一键登录链接，再进入「跑团工作台」
+3. 用 QQ 扫码登录，打开控制台打印的一键登录链接，随后可选择会话并导出记录
 4. 也可手动访问 `http://localhost:40653/qce`，令牌见控制台输出；在「设置 → 启动」里可开启登录后自动打开浏览器
 
 > \[!NOTE]
@@ -110,14 +110,13 @@ docker logs -f napcat-qce
 
 [image-banner]: docs/images/banner.png
 [docs-link]: https://shuakami.github.io/qq-chat-exporter/
-[log-releases-link]: https://github.com/annncatto/qq-chat-exporter/releases
-[releases-link]: https://github.com/shuakami/qq-chat-exporter/releases
+[releases-link]: https://github.com/annncatto/qq-chat-exporter-log/releases
 [issues-link]: https://github.com/shuakami/qq-chat-exporter/issues
-[stars-link]: https://github.com/shuakami/qq-chat-exporter/stargazers
+[stars-link]: https://github.com/annncatto/qq-chat-exporter-log/stargazers
 [license-link]: LICENSE
 [docker-doc]: https://shuakami.github.io/qq-chat-exporter/docs/docker-napcat-deployment.html
 [macos-doc]: https://shuakami.github.io/qq-chat-exporter/docs/macos-deploy.html
-[github-release-shield]: https://img.shields.io/github/v/release/shuakami/qq-chat-exporter?color=317cfe&labelColor=black&logo=github&style=flat-square
-[github-downloads-shield]: https://img.shields.io/github/downloads/shuakami/qq-chat-exporter/total?color=317cfe&labelColor=black&style=flat-square
-[github-stars-shield]: https://img.shields.io/github/stars/shuakami/qq-chat-exporter?color=317cfe&labelColor=black&style=flat-square
+[github-release-shield]: https://img.shields.io/github/v/release/annncatto/qq-chat-exporter-log?include_prereleases&color=317cfe&labelColor=black&logo=github&style=flat-square
+[github-downloads-shield]: https://img.shields.io/github/downloads/annncatto/qq-chat-exporter-log/total?color=317cfe&labelColor=black&style=flat-square
+[github-stars-shield]: https://img.shields.io/github/stars/annncatto/qq-chat-exporter-log?color=317cfe&labelColor=black&style=flat-square
 [github-license-shield]: https://img.shields.io/badge/license-GPL--3.0-317cfe?labelColor=black&style=flat-square
