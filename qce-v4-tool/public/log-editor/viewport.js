@@ -155,7 +155,8 @@ window.LogViewport = class LogViewport {
     const start = this.prefix[position],
       end = this.prefix[position + 1],
       height = this.element.clientHeight;
-    if (center) this.element.scrollTop = Math.max(0, start - height * 0.3);
+    if (end - start >= height) this.element.scrollTop = start;
+    else if (center) this.element.scrollTop = Math.max(0, start - height * 0.3);
     else if (start < this.element.scrollTop) this.element.scrollTop = start;
     else if (end > this.element.scrollTop + height)
       this.element.scrollTop = Math.max(0, end - height);
@@ -167,7 +168,8 @@ window.LogViewport = class LogViewport {
       if (!row) return;
       const a = row.getBoundingClientRect(),
         b = this.element.getBoundingClientRect();
-      if (a.top < b.top) this.element.scrollTop += a.top - b.top;
+      if (a.height >= b.height || a.top < b.top)
+        this.element.scrollTop += a.top - b.top;
       else if (a.bottom > b.bottom && a.height < b.height)
         this.element.scrollTop += a.bottom - b.bottom;
       this.schedule();

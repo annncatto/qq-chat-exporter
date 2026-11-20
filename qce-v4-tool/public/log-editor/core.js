@@ -659,13 +659,18 @@
       const content = kept
         .map((message) => {
           const round = project.state.rounds[message.id] || "";
+          const section =
+            round !== previous && (round || previous)
+              ? "<h2>" + escapeHTML(round || "未归类") + "</h2>"
+              : "";
+          previous = round;
           return (
+            section +
             '<article id="m' +
             message.id +
-            '"><header>' +
+            '"><header>【' +
             escapeHTML(role(project, message)) +
-            (round ? " · " + escapeHTML(round) : "") +
-            "</header><p>" +
+            "】</header><p>" +
             escapeHTML(body(project, message.id)) +
             "</p></article>"
           );
@@ -702,8 +707,8 @@
       previous = round;
       lines.push(
         format === "md"
-          ? "**" + escapeMD(role(project, message)) + "**"
-          : role(project, message) + "：",
+          ? "**【" + escapeMD(role(project, message)) + "】**  "
+          : "【" + role(project, message) + "】",
         format === "md"
           ? escapeMD(body(project, message.id))
           : body(project, message.id),
@@ -711,6 +716,13 @@
       );
     }
     return lines.join("\n");
+  }
+  function editKept(project, index, text) {
+    if (!project.messages[index] || project.state.decisions[index] !== "keep")
+      throw new Error("只能编辑已保留的 Log 正文。");
+    if (typeof text !== "string" || !text.trim())
+      throw new Error("正文不能为空。");
+    project.state.edits[index] = text;
   }
   function packed(project) {
     return JSON.stringify(validateProject(project));
@@ -730,6 +742,7 @@
     groups,
     output,
     packed,
+    editKept,
     escapeHTML,
     clone,
   };

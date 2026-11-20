@@ -55,6 +55,23 @@
   const clearError = () => {
     el("error").hidden = true;
   };
+  const manuscript = new window.LogManuscript({
+    C,
+    el,
+    getProject: () => project,
+    canOpen: () => !editing(),
+    review: () => resumeReview(),
+    beforeEdit: () => remember(),
+    changed: () => scheduleSave(),
+    canUndo: () => history.length > 0,
+    undo: () => undo(),
+    assign: (ids, label) =>
+      update("已归入 " + label, () => C.assign(project, ids, label)),
+    closed: () => {
+      if (project) render(false);
+      resumeReview();
+    },
+  });
   function database() {
     if (!dbPromise)
       dbPromise = new Promise((resolve, reject) => {
@@ -289,6 +306,7 @@
     status = "第 " + (index + 1) + " 条";
     render(false);
     activePane.view.reveal(index, center);
+    resumeReview();
     scheduleSave();
   }
   function openScope(scope, pane = activePane) {
@@ -304,7 +322,11 @@
       ids.find((i) => state().decisions[i] === "pending") ?? ids[0] ?? null;
     status = scopeLabel(scope);
     render(true);
+    resumeReview();
     scheduleSave();
+  }
+  function resumeReview() {
+    activePane?.viewport.focus({ preventScroll: true });
   }
   function decide(kind) {
     if (!current()) return;
@@ -338,15 +360,6 @@
           C.assign(project, [...selected], label);
           selected.clear();
           anchor = null;
-        },
-        false,
-      );
-    else
-      update(
-        label ? "当前整理：" + label : "已关闭自动归属",
-        () => {
-          C.startSection(project, label);
-          state().useSection = !!label;
         },
         false,
       );
@@ -384,7 +397,6 @@
   function sourceOptions(select, scope) {
     const values = [
       { label: "全部原文", scope: { type: "all" } },
-      { label: "整理稿", scope: { type: "draft" } },
       ...project.windows.map((w) => ({
         label: w.name,
         scope: { type: "window", windowId: w.id },
@@ -418,8 +430,10 @@
     pane.select.addEventListener("change", () =>
       openScope(JSON.parse(pane.select.value), pane),
     );
+    pane.badge = node("span", "r-pane-badge");
     head.append(
       pane.select,
+      pane.badge,
       button("收起", () => removePane(pane), "关闭阅读窗"),
     );
     pane.viewport = node("div", "r-scroll");
@@ -464,8 +478,9 @@
     if (!project) return;
     if (add || panes.length === 1) addPane(activePane.scope);
     el("panes").classList.toggle("is-vertical", vertical);
-    render(false);
+    render(true);
     root.querySelector(".r-split-menu").open = false;
+    resumeReview();
   }
   async function toggleFlow() {
     const on = !root.classList.contains("is-flow");
@@ -709,7 +724,7 @@
     el("selection-count").textContent = selected.size
       ? "已选 " + selected.size + " 条"
       : "";
-    el("assign").textContent = selected.size ? "归入" : "使用";
+    el("assign").hidden = !selected.size;
     renderSections();
   }
   function renderManagers() {
@@ -752,11 +767,6 @@
             project.messages.filter((m) => m.windowId === window.id).length +
               " 条",
           ),
-          button(
-            "查看",
-            () => openScope({ type: "window", windowId: window.id }),
-            "查看窗口 " + window.name,
-          ),
         );
         row.append(line, meta);
         return row;
@@ -768,11 +778,6 @@
           account = node("div", "r-source-meta");
         account.append(
           node("span", "", person.name + " · " + (person.qq || "UID")),
-          button(
-            "查看",
-            () => openScope({ type: "person", personId: person.id }),
-            "查看角色 " + person.role,
-          ),
         );
         const line = node("div", "r-source-line"),
           input = node("input");
@@ -795,38 +800,6 @@
         return row;
       }),
     );
-    const expanded = new Set(
-      [...el("directory").querySelectorAll("details[open]")].map(
-        (d) => d.dataset.person,
-      ),
-    );
-    el("directory").replaceChildren();
-    for (const group of C.groups(project)) {
-      const details = node("details", "r-role");
-      details.dataset.person = group.person.id;
-      details.open = expanded.has(group.person.id);
-      details.append(node("summary", "", group.person.role));
-      const list = node("div", "r-round");
-      for (const round of group.rounds) {
-        const b = button(
-          "",
-          () =>
-            openScope({
-              type: "round",
-              personId: group.person.id,
-              round: round.round,
-            }),
-          group.person.role + " · " + (round.round || "未归类"),
-        );
-        b.append(
-          node("span", "", round.round || "未归类"),
-          node("span", "", String(round.ids.length)),
-        );
-        list.append(b);
-      }
-      details.append(list);
-      el("directory").append(details);
-    }
   }
   function renderSections() {
     if (!project) return;
@@ -842,6 +815,7 @@
         state().sections.concat(Object.values(state().rounds)).filter(Boolean),
       ),
     ];
+    el("sections-table").classList.toggle("has-selection", !!selected.size);
     el("sections-body").replaceChildren(
       ...labels.map((label) => {
         const row = node(
@@ -857,7 +831,7 @@
           button(
             label || "未归类",
             () =>
-              openScope(
+              manuscript.open(
                 label
                   ? { type: "section", round: label }
                   : { type: "unassigned" },
@@ -865,17 +839,10 @@
             "查看 " + (label || "未归类"),
           ),
         );
-        action.append(
-          button(
-            selected.size
-              ? "归入"
-              : state().useSection && state().defaultRound === label
-                ? "使用中"
-                : "使用",
-            () => assign(label),
-            "使用归属 " + (label || "不自动归类"),
-          ),
-        );
+        if (selected.size)
+          action.append(
+            button("归入", () => assign(label), "归入 " + (label || "未归类")),
+          );
         row.append(name, count, action);
         return row;
       }),
@@ -893,8 +860,17 @@
         (pane.scope.personId && !peopleMap.has(pane.scope.personId))
       )
         pane.scope = { type: "all" };
+      pane.element.classList.toggle("is-active", pane === activePane);
       pane.element.querySelector("button").disabled = editing();
       pane.ids = C.indices(project, pane.scope);
+      pane.badge.textContent =
+        pane !== activePane
+          ? "参考"
+          : !pane.ids.length
+            ? "无消息"
+            : pane.ids.some((i) => state().decisions[i] === "pending")
+              ? "审阅中"
+              : "本窗已确认";
       sourceOptions(pane.select, pane.scope);
     }
     const ids = activePane.ids;
@@ -910,18 +886,12 @@
     el("progress").textContent =
       "已确认 " + (included.length - pending) + " / " + included.length;
     el("total").textContent = ids.length + " 条";
-    el("scope").textContent = scopeLabel(activePane.scope);
-    el("unassigned-count").textContent = C.indices(project, {
-      type: "unassigned",
-    }).length;
-    el("all").setAttribute(
-      "aria-pressed",
-      String(activePane.scope.type === "all"),
-    );
-    el("draft-view").setAttribute(
-      "aria-pressed",
-      String(activePane.scope.type === "draft"),
-    );
+    el("scope").textContent = "审阅 · " + scopeLabel(activePane.scope);
+    el("scope").hidden = panes.length === 1;
+    el("source").hidden = panes.length > 1;
+    sourceOptions(el("source"), activePane.scope);
+    el("all").setAttribute("aria-pressed", String(!manuscript.active()));
+    el("draft-view").setAttribute("aria-pressed", String(manuscript.active()));
     el("return").hidden = !state().returnPoint;
     el("return").disabled = editing();
     el("select-all-label").hidden =
@@ -942,10 +912,10 @@
       : "编辑 <kbd>E</kbd>";
     el("undo").disabled = editing() || !history.length;
     el("current-location").textContent = current()
-      ? "当前 #" + (state().current + 1) + " " + C.role(project, current())
+      ? "#" + (state().current + 1)
       : "暂无内容";
     el("current-location").disabled = !current();
-    el("status").textContent = status + (!pending ? " · 全部已确认" : "");
+    el("status").textContent = status;
     el("save-project").disabled = false;
     el("use-section").checked = state().useSection;
     el("use-section").disabled = editing();
@@ -967,6 +937,8 @@
     for (const pane of panes) pane.view.setItems(pane.ids, project);
     renderManagers();
     renderChecks();
+    el("draft-view").disabled = editing();
+    manuscript.refresh();
     if (reveal && current()) activePane.view.reveal(state().current);
     if (editing()) {
       const input = el("draft");
@@ -1068,6 +1040,7 @@
     try {
       await protectCurrent();
       project = null;
+      manuscript.refresh();
       selected.clear();
       history = [];
       for (const pane of panes) pane.view.destroy();
@@ -1154,7 +1127,11 @@
   el("round").addEventListener("keydown", (event) => {
     if (event.key === "Enter" && !event.isComposing) {
       event.preventDefault();
-      assign();
+      if (selected.size) assign();
+      else {
+        el("round").blur();
+        resumeReview();
+      }
     }
   });
   el("assign").addEventListener("click", () => assign());
@@ -1165,14 +1142,13 @@
       state().useSection = enabled;
     });
     if (enabled && !state().defaultRound) el("round").focus();
+    else resumeReview();
   });
+  el("source").addEventListener("change", () =>
+    openScope(JSON.parse(el("source").value)),
+  );
   el("all").addEventListener("click", () => openScope({ type: "all" }));
-  el("draft-view").addEventListener("click", () =>
-    openScope({ type: "draft" }),
-  );
-  el("unassigned").addEventListener("click", () =>
-    openScope({ type: "unassigned" }),
-  );
+  el("draft-view").addEventListener("click", () => manuscript.open());
   el("return").addEventListener("click", () => {
     if (!project || !state().returnPoint || editing()) return;
     state().current = state().returnPoint.current;
@@ -1182,6 +1158,7 @@
     selected.clear();
     status = "已回到原进度";
     render(true);
+    resumeReview();
     scheduleSave();
   });
   el("prev").addEventListener("click", () => {
@@ -1217,6 +1194,17 @@
     anchor = null;
     renderChecks();
   });
+  for (const menu of [
+    el("open-menu"),
+    el("export-menu"),
+    root.querySelector(".r-split-menu"),
+    el("sidebar"),
+    el("sections-panel"),
+  ])
+    menu.addEventListener("toggle", () => {
+      if (!menu.open && project && !editing() && !manuscript.active())
+        resumeReview();
+    });
   for (const id of ["sidebar", "sections-panel"])
     el(id).addEventListener("toggle", () => {
       if (el(id).open && matchMedia("(max-width:720px)").matches)
@@ -1300,12 +1288,19 @@
       event.altKey
     )
       return;
+    if (manuscript.active()) {
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "s") {
+        event.preventDefault();
+        saveProject();
+      }
+      return;
+    }
     const typing =
       event.target instanceof HTMLElement &&
       (event.target.isContentEditable ||
-        ["INPUT", "TEXTAREA", "SELECT", "SUMMARY"].includes(
-          event.target.tagName,
-        ));
+        ["INPUT", "TEXTAREA", "SELECT"].includes(event.target.tagName) ||
+        (event.target.tagName === "SUMMARY" &&
+          event.target.parentElement?.hasAttribute("open")));
     if (editing()) {
       if ((event.ctrlKey || event.metaKey) && event.key === "Enter") {
         event.preventDefault();

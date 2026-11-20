@@ -49,7 +49,7 @@ test("round grouping cannot bypass manual review", () => {
   C.decide(p, 0, "keep");
   assert.equal(p.state.current, 1);
   assert.deepEqual(p.state.decisions, ["keep", "pending"]);
-  assert.doesNotMatch(C.output(p), /乙：/);
+  assert.doesNotMatch(C.output(p), /【乙】/);
 });
 test("edited text and exclusion never modify original source", () => {
   const p = parse([
@@ -286,4 +286,30 @@ test("a draft cannot silently apply to a different current message", () => {
   ]);
   p.state.draft = { index: 1, text: "未确认草稿" };
   assert.throws(() => C.validateProject(p), /草稿/);
+});
+
+test("retained Log text uses a bracketed role and an actual newline", () => {
+  const p = parse([row(0, "10001", "u_1", "KP", "第一行\n第二行")]);
+  C.decide(p, 0, "keep");
+  assert.match(C.output(p), /【KP】\n第一行\n第二行/);
+  assert.doesNotMatch(C.output(p), /\/\//);
+  assert.match(
+    C.output(p, "html"),
+    /<header>【KP】<\/header><p>第一行\n第二行<\/p>/,
+  );
+});
+test("editing the manuscript preserves source text, review decisions and cursor", () => {
+  const p = parse([
+    row(0, "10001", "u_1", "KP", "原文"),
+    row(1, "10002", "u_2", "乙", "未确认"),
+  ]);
+  C.decide(p, 0, "keep");
+  const before = C.clone(p);
+  C.editKept(p, 0, "成稿修订");
+  assert.deepEqual(p.original, before.original);
+  assert.deepEqual(p.state.decisions, before.state.decisions);
+  assert.equal(p.state.current, before.state.current);
+  assert.match(C.output(p), /【KP】\n成稿修订/);
+  assert.throws(() => C.editKept(p, 1, "不应确认"), /已保留/);
+  assert.throws(() => C.editKept(p, 0, ""), /不能为空/);
 });

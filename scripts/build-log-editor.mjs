@@ -12,6 +12,7 @@ const sharedCss = await readFile(
 );
 const core = await readFile(resolve(source, "core.js"), "utf8");
 const app = await readFile(resolve(source, "app.js"), "utf8");
+const manuscript = await readFile(resolve(source, "manuscript.js"), "utf8");
 const viewport = await readFile(resolve(source, "viewport.js"), "utf8");
 html = html.replace(
   /<link rel="stylesheet" href="style\.css"\s*\/?>/,
@@ -22,13 +23,13 @@ html = html.replace(
   () => `<style>${sharedCss}</style>`,
 );
 html = html.replace(
-  /\s*<script src="(?:core|viewport|app)\.js" defer><\/script>/g,
+  /\s*<script src="(?:core|viewport|manuscript|app)\.js" defer><\/script>/g,
   "",
 );
 html = html.replace(
   "</body>",
   () =>
-    `<script>${(core + "\n" + viewport + "\n" + app).replaceAll("</script", "<\\/script")}</script></body>`,
+    `<script>${(core + "\n" + viewport + "\n" + manuscript + "\n" + app).replaceAll("</script", "<\\/script")}</script></body>`,
 );
 await mkdir(resolve(root, "out"), { recursive: true });
 const output = resolve(root, "out/log-editor-standalone.html");

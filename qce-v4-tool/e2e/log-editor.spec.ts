@@ -68,16 +68,17 @@ test("real file review, identity binding, draft recovery, grouping and portable 
   await page.keyboard.press("s");
   await page.keyboard.press("a");
   await expect(page.locator("#rr-progress")).toHaveText("已确认 4 / 4");
-  await page.locator("#rr-sidebar > summary").click();
-  await page.locator("#rr-unassigned").click();
-  await page.locator("#rr-select-all").check();
+  for (const index of [1, 2, 4])
+    await page
+      .getByRole("checkbox", { name: "选择第 " + index + " 条", exact: true })
+      .check();
   await page.locator("#rr-round").fill("第1回合");
   await page.locator("#rr-round").press("Enter");
-  await expect(page.locator("#rr-unassigned-count")).toHaveText("0");
   await expect(page.locator("#rr-progress")).toHaveText("已确认 4 / 4");
   await page.locator("#rr-draft-view").click();
-  await expect(page.locator(".r-scroll")).toContainText("我站在门边。");
-  await expect(page.locator(".r-scroll")).not.toContainText("等一下");
+  await expect(page.locator("#rr-log-content")).toContainText("我站在门边。");
+  await expect(page.locator("#rr-log-content")).not.toContainText("等一下");
+  await page.locator("#rr-log-close").click();
   const projectDownload = page.waitForEvent("download");
   await page.locator("#rr-open-menu > summary").click();
   await page.locator("#rr-save-project").click();
@@ -107,7 +108,7 @@ test("real file review, identity binding, draft recovery, grouping and portable 
   const textDownload = page.waitForEvent("download");
   await page.locator('[data-export="txt"]').click();
   const text = await readFile((await (await textDownload).path())!, "utf8");
-  expect(text).toContain("林雾：");
+  expect(text).toContain("【林雾】\n我站在门边。");
   expect(text).toContain("我站在门边。");
   expect(text).not.toContain("等一下");
   expect(errors).toEqual([]);
@@ -162,7 +163,7 @@ test("consecutive source handoffs keep the most recently selected task", async (
       );
   }, fixture);
   await expect(page.locator("#rr-progress")).toHaveText("已确认 0 / 8");
-  await expect(page.locator("#rr-scope")).toHaveText("第二份");
+  await expect(page.locator("#rr-scope")).toContainText("第二份");
 });
 
 test("mobile review fits a narrow touch screen", async ({ browser }) => {
@@ -357,7 +358,7 @@ test("QCE export enters editing directly and keeps its workspace when changing t
   await page.getByRole("button", { name: "任务", exact: true }).click();
   await page.getByRole("button", { name: "整理", exact: true }).click();
   await expect(editor.locator("#rr-title")).toHaveText("验证团");
-  await expect(editor.locator("#rr-scope")).toHaveText("验证团");
+  await expect(editor.locator("#rr-scope")).toContainText("验证团");
   await expect(editor.locator("#rr-progress")).toHaveText("已确认 1 / 8");
   expect(sourceReads).toBe(2);
   await page.getByRole("button", { name: "会话", exact: true }).click();
@@ -403,18 +404,23 @@ test("active chapter follows review actions and cleaned messages can be drag ass
   expect(packed.state.decisions).toEqual(["keep", "exclude", "keep", "keep"]);
   await page.locator("#rr-open-menu > summary").click();
   await page.locator("#rr-draft-view").click();
-  const first = await page.locator('[data-message="1"] .content').boundingBox();
-  const last = await page.locator('[data-message="4"] .content').boundingBox();
+  const first = await page
+    .locator('[data-log-index="0"] .r-log-body')
+    .boundingBox();
+  const last = await page
+    .locator('[data-log-index="3"] .r-log-body')
+    .boundingBox();
   expect(first).toBeTruthy();
   expect(last).toBeTruthy();
   await page.mouse.move(first!.x + 8, first!.y + 8);
   await page.mouse.down();
   await page.mouse.move(last!.x + 8, last!.y + 12, { steps: 16 });
   await page.mouse.up();
-  await expect(page.locator("#rr-selection-count")).toHaveText("已选 3 条");
-  await page.locator("#rr-round").fill("第2回合");
-  await page.locator("#rr-round").press("Enter");
-  await expect(page.locator("#rr-selection-count")).toHaveText("");
+  await expect(page.locator("#rr-log-selection-count")).toHaveText("已选 3 条");
+  await page.locator("#rr-log-round").fill("第2回合");
+  await page.locator("#rr-log-round").press("Enter");
+  await expect(page.locator("#rr-log-selection")).toBeHidden();
+  await page.locator("#rr-log-close").click();
   packed = await portableProject(page);
   expect(packed.state.rounds).toEqual({
     0: "第2回合",
@@ -553,6 +559,19 @@ test("compact collapsible managers and flow mode retain independent reading pane
   const searchBox = await page.locator("#rr-search").boundingBox();
   expect(searchBox!.width).toBeLessThanOrEqual(190);
   expect(searchBox!.height).toBeLessThan(32);
+  const highlight = await page
+    .locator(".r-current")
+    .evaluate((row) => ({
+      width: row.getBoundingClientRect().width,
+      pane: row.closest(".r-scroll")!.clientWidth,
+      color: getComputedStyle(row).backgroundColor,
+      bubble: getComputedStyle(document.documentElement)
+        .getPropertyValue("--bubble-self")
+        .trim(),
+    }));
+  expect(Math.abs(highlight.width - highlight.pane)).toBeLessThan(1);
+  expect(highlight.color).toBe("rgb(237, 245, 255)");
+  expect(highlight.bubble).toBe("#262626");
   await page.locator(".r-split-menu > summary").click();
   await page.locator("#rr-split-horizontal").click();
   await expect(page.locator(".r-pane")).toHaveCount(2);
@@ -577,4 +596,208 @@ test("compact collapsible managers and flow mode retain independent reading pane
   await expect(page.locator("#rr-windows")).toBeVisible();
   await page.locator("#rr-sidebar > summary").click();
   await expect(page.locator("#rr-windows")).toBeHidden();
+});
+
+for (const direction of ["horizontal", "vertical"] as const) {
+  test(`split ${direction} restores review keys after choosing a pane source`, async ({
+    page,
+  }) => {
+    await importFixture(page);
+    await page.locator(".r-split-menu > summary").click();
+    await page.locator(`#rr-split-${direction}`).click();
+    const right = page.locator(".r-pane").nth(1);
+    await right.locator("select").focus();
+    await right
+      .locator("select")
+      .selectOption(JSON.stringify({ type: "person", personId: "qq:10002" }));
+    await page.keyboard.press("a");
+    await expect(page.locator("#rr-progress")).toHaveText("已确认 1 / 4");
+    await expect(right.locator(".r-current")).toHaveAttribute(
+      "data-message",
+      "3",
+    );
+    await expect(right.locator(".r-current")).toBeInViewport();
+    await page.keyboard.press("e");
+    await page.locator("#rr-draft").fill("修订后的句子");
+    await page.keyboard.press("Control+Enter");
+    await expect(page.locator("#rr-progress")).toHaveText("已确认 2 / 4");
+  });
+}
+
+test("three split panes advance A, S and edit-confirm through tall messages in the active pane", async ({
+  page,
+}) => {
+  await page.goto(EDITOR);
+  const data = {
+    chatInfo: { name: "分屏长文" },
+    messages: Array.from({ length: 80 }, (_, i) => ({
+      ...fixture.messages[i % 4],
+      id: String(i),
+      content: {
+        text: ("第" + (i + 1) + "条正文。\n").repeat(i % 2 === 1 ? 80 : 1),
+      },
+    })),
+  };
+  await page.locator("#rr-file").setInputFiles({
+    name: "长文.json",
+    mimeType: "application/json",
+    buffer: Buffer.from(JSON.stringify(data)),
+  });
+  await expect(page.locator("#rr-total")).toHaveText("80 条");
+  await page.locator(".r-split-menu > summary").click();
+  await page.locator("#rr-split-vertical").click();
+  await page.locator(".r-split-menu > summary").click();
+  await page.locator("#rr-add-pane").click();
+  const active = page.locator(".r-pane").nth(2);
+  await active.locator("select").focus();
+  await active.locator("select").selectOption(JSON.stringify({ type: "all" }));
+  for (let i = 0; i < 6; i++) {
+    if (i % 3 === 2) {
+      await page.keyboard.press("e");
+      await page.locator("#rr-draft").fill("编辑正文" + i);
+      await page.keyboard.press("Control+Enter");
+    } else await page.keyboard.press(i % 3 === 0 ? "a" : "s");
+    await expect(page.locator("#rr-progress")).toHaveText(
+      `已确认 ${i + 1} / 80`,
+    );
+    const row = active.locator(".r-current");
+    await expect(row).toHaveAttribute("data-message", String(i + 2));
+    await expect
+      .poll(async () =>
+        row.evaluate((e) => {
+          const a = e.getBoundingClientRect(),
+            b = e.closest(".r-scroll")!.getBoundingClientRect();
+          return Math.round(a.top - b.top);
+        }),
+      )
+      .toBeGreaterThanOrEqual(-10);
+    await expect(row).toBeInViewport();
+  }
+});
+
+test("optional text preview expands into an editor without confirming unreviewed messages", async ({
+  page,
+}) => {
+  await importFixture(page);
+  await page.locator("#rr-preview-toggle").check();
+  await expect(page.locator("#rr-preview-text")).toHaveText("尚无保留内容");
+  await page.keyboard.press("a");
+  await expect(page.locator("#rr-preview-text")).toContainText(
+    "【主持人】\n你们来到门前。",
+  );
+  await page.keyboard.press("s");
+  await expect(page.locator("#rr-preview-text")).not.toContainText(
+    "我站再门边",
+  );
+  await page.locator("#rr-preview-text").click();
+  await expect(page.locator("#rr-log-editor")).toBeVisible();
+  await expect(page.locator("#rr-draft-view")).toHaveAttribute(
+    "aria-pressed",
+    "true",
+  );
+  const body = page.getByRole("textbox", {
+    name: "编辑 Log 第 1 条",
+    exact: true,
+  });
+  await body.fill("改写的正文\n第二行");
+  await body.press("a");
+  await expect(page.locator("#rr-progress")).toHaveText("已确认 2 / 4");
+  await page.locator("#rr-log-undo").click();
+  await expect(body).toHaveText("你们来到门前。");
+  await body.fill("最终正文\n第二行");
+  await page.locator("#rr-log-close").click();
+  await expect(page.locator("#rr-preview-text")).toContainText(
+    "【主持人】\n最终正文\n第二行",
+  );
+  await expect(page.locator(".r-current")).toHaveAttribute("data-message", "3");
+  await expect(page.locator("#rr-all")).toHaveAttribute("aria-pressed", "true");
+  const packed = await portableProject(page);
+  expect(packed.original).toEqual(fixture);
+  expect(packed.state.decisions).toEqual([
+    "keep",
+    "exclude",
+    "pending",
+    "pending",
+  ]);
+  expect(packed.state.edits[0]).toBe("最终正文\n第二行");
+  await expect(page.locator("#rr-save")).toHaveText("已自动保存");
+  await page.reload();
+  await expect(page.locator("#rr-preview-toggle")).toBeChecked();
+  await expect(page.locator("#rr-preview-text")).toContainText(
+    "【主持人】\n最终正文\n第二行",
+  );
+});
+
+test("single-pane source changes also restore the review keys and chapter checkbox needs no use button", async ({
+  page,
+}) => {
+  await importFixture(page);
+  await page.locator("#rr-source").focus();
+  await page
+    .locator("#rr-source")
+    .selectOption(JSON.stringify({ type: "person", personId: "qq:10002" }));
+  await expect(page.locator("#rr-all")).toHaveAttribute("aria-pressed", "true");
+  await expect(page.locator("#rr-assign")).toBeHidden();
+  await page.locator("#rr-round").fill("第3章");
+  await page.locator("#rr-use-section").check();
+  await page.keyboard.press("a");
+  await expect(page.locator("#rr-progress")).toHaveText("已确认 1 / 4");
+  await expect(page.locator(".r-current")).toHaveAttribute("data-message", "3");
+  const packed = await portableProject(page);
+  expect(packed.state.rounds[1]).toBe("第3章");
+  await page.locator("#rr-open-menu > summary").click();
+  await page.keyboard.press("s");
+  await expect(page.locator("#rr-progress")).toHaveText("已确认 2 / 4");
+});
+
+test("reviewing a different source window advances only its active split pane", async ({
+  page,
+}) => {
+  await importFixture(page);
+  const other = {
+    ...fixture,
+    chatInfo: { name: "私聊" },
+    messages: fixture.messages.map((m) => ({
+      ...m,
+      time: m.time.replace("20:", "21:"),
+    })),
+  };
+  await page.locator("#rr-file").setInputFiles({
+    name: "私聊.json",
+    mimeType: "application/json",
+    buffer: Buffer.from(JSON.stringify(other)),
+  });
+  await expect(page.locator("#rr-total")).toHaveText("8 条");
+  await page.locator(".r-split-menu > summary").click();
+  await page.locator("#rr-split-horizontal").click();
+  const pane = page.locator(".r-pane").nth(1);
+  await pane.locator("select").focus();
+  await pane.locator("select").selectOption({ label: "私聊" });
+  await expect(pane.locator(".r-pane-badge")).toHaveText("审阅中");
+  await page.keyboard.press("a");
+  await expect(pane.locator(".r-current")).toHaveAttribute("data-message", "6");
+  await page.keyboard.press("s");
+  await expect(pane.locator(".r-current")).toHaveAttribute("data-message", "7");
+  await page.keyboard.press("e");
+  await page.locator("#rr-draft").fill("私聊修订");
+  await page.keyboard.press("Control+Enter");
+  await expect(pane.locator(".r-current")).toHaveAttribute("data-message", "8");
+  await expect(pane.locator(".r-current")).toBeInViewport();
+  const packed = await portableProject(page);
+  expect(packed.state.decisions.slice(0, 4)).toEqual([
+    "pending",
+    "pending",
+    "pending",
+    "pending",
+  ]);
+  expect(packed.state.decisions.slice(4)).toEqual([
+    "keep",
+    "exclude",
+    "keep",
+    "pending",
+  ]);
+  await page.locator("#rr-open-menu > summary").click();
+  await page.keyboard.press("s");
+  await expect(pane.locator(".r-pane-badge")).toHaveText("本窗已确认");
+  await expect(page.locator("#rr-progress")).toHaveText("已确认 4 / 8");
 });
