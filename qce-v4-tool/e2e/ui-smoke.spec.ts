@@ -1388,8 +1388,14 @@ test.describe('Standalone mode (issue #340)', () => {
         // 引导卡片可见。
         const banner = page.getByTestId('sessions-standalone-banner');
         await expect(banner).toBeVisible({ timeout: 10_000 });
-        await expect(banner.getByText('独立模式：仅可浏览已导出的内容')).toBeVisible();
+        await expect(banner.getByText('独立模式 · 使用本地聊天记录')).toBeVisible();
         await expect(banner.getByRole('button', { name: /浏览聊天记录/ })).toBeVisible();
+
+        await banner.getByRole('button', { name: '打开跑团工作台' }).click();
+        const editor = page.frameLocator('iframe[title="跑团 log 整理"]');
+        await expect(editor.getByRole('button', { name: '导入记录', exact: true })).toBeVisible();
+        await expect(page.getByRole('button', { name: '从 QQ 导入' })).toHaveCount(0);
+        await sessionsTab.click();
 
         // 给一点时间确保前端没有偷偷发请求。
         await page.waitForTimeout(800);

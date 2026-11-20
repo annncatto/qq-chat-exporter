@@ -7,9 +7,13 @@ import { logEditorSourcePath } from "@/lib/log-editor";
 
 const MAX_SOURCE_BYTES = 64 * 1024 * 1024;
 
-export function LogEditorPanel({ task }: { task: ExportTask | null }) {
+export function LogEditorPanel({ active, task, waiting, onTaskFinished }: {
+  active: boolean;
+  task: ExportTask | null;
+  waiting: number;
+  onTaskFinished: (taskId: string) => void;
+}) {
   const frame = useRef<HTMLIFrameElement>(null);
-  const container = useRef<HTMLElement>(null);
   const [ready, setReady] = useState(false);
   const [height, setHeight] = useState(850);
   const [flowMode, setFlowMode] = useState(false);
@@ -35,31 +39,36 @@ export function LogEditorPanel({ task }: { task: ExportTask | null }) {
       if (
         event.data?.type === "qce-log-editor:loaded" &&
         event.data.taskId === taskId.current
-      )
+      ) {
         setOpening(false);
+        onTaskFinished(event.data.taskId);
+      }
       if (
         event.data?.type === "qce-log-editor:error" &&
         event.data.taskId === taskId.current
-      )
+      ) {
+        setError("无法导入这份记录。详情见工作台。");
         setOpening(false);
+      }
     };
     window.addEventListener("message", receive);
     return () => window.removeEventListener("message", receive);
-  }, []);
+  }, [onTaskFinished]);
 
   useEffect(() => {
+    if (!active) return;
     const resize = () =>
       setHeight(
         Math.max(
           420,
           window.innerHeight -
-            (container.current?.getBoundingClientRect().top ?? 64),
+            (frame.current?.getBoundingClientRect().top ?? 64),
         ),
       );
     resize();
     window.addEventListener("resize", resize);
     return () => window.removeEventListener("resize", resize);
-  }, [opening]);
+  }, [active, opening, waiting, error, flowMode]);
 
   useEffect(() => {
     if (!ready || !task) return;
@@ -114,17 +123,13 @@ export function LogEditorPanel({ task }: { task: ExportTask | null }) {
 
   const src =
     process.env.NODE_ENV === "production"
-      ? "/static/qce/log-editor/index.html"
-      : "/log-editor/index.html";
+      ? "/static/qce/log-editor/workspace.html"
+      : "/log-editor/workspace.html";
   return (
-    <section
-      ref={container}
-      className="min-w-0"
-      aria-label="跑团 log 整理工作区"
-    >
-      {opening && (
-        <p role="status" className="p-4 text-sm text-muted-foreground">
-          正在打开记录…
+    <section className="min-w-0" aria-label="跑团 log 整理工作区">
+      {(!error && (opening || waiting > 0)) && (
+        <p role="status" className="px-4 py-2 text-xs text-muted-foreground">
+          {opening ? "正在打开导入记录…" : "正在准备 QQ 记录…"}
         </p>
       )}
       {error && (
@@ -140,13 +145,24 @@ export function LogEditorPanel({ task }: { task: ExportTask | null }) {
           >
             重试
           </button>
+          {task && (
+            <button
+              type="button"
+              onClick={() => {
+                setError("");
+                onTaskFinished(task.id);
+              }}
+              className="underline underline-offset-4"
+            >
+              跳过
+            </button>
+          )}
         </div>
       )}
       <iframe
         ref={frame}
         src={src}
         onLoad={() => setReady(true)}
-        hidden={opening}
         allowFullScreen
         title="跑团 log 整理"
         className="w-full border-0"

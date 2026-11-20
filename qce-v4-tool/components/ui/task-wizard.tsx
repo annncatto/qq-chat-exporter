@@ -1590,7 +1590,9 @@ export function TaskWizard({
               {forLogEditing ? "导出并整理" : form.historySource === "roaming" ? "创建漫游导出任务" : "创建导出任务"}
             </h1>
             <p className="text-[13px] text-muted-foreground mb-8 leading-relaxed">
-              {form.historySource === "roaming"
+              {forLogEditing
+                ? "选择会话和时间范围，记录会自动进入工作台。"
+                : form.historySource === "roaming"
                 ? "选择日期范围，后台会扫描当前账号可见的私聊漫游记录并生成导出文件。"
                 : "配置您的导出偏好，确认无误后即可开始导出。"}
             </p>

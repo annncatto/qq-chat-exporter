@@ -303,6 +303,13 @@ body {
   gap: 5px;
   align-items: center;
 }
+#trpg-review-flow #rr-range-mode {
+  display: none;
+}
+#trpg-review-flow.is-selecting-range .r-scroll {
+  touch-action: none;
+  user-select: none;
+}
 #trpg-review-flow .r-panes {
   display: flex;
   flex: 1;
@@ -367,7 +374,6 @@ body {
 #trpg-review-flow .message-block {
   position: relative;
   padding: 7px max(12px, calc((100% - 820px) / 2));
-  padding-left: max(36px, calc((100% - 820px) / 2 + 24px));
   margin: 0;
   cursor: default;
 }
@@ -418,16 +424,6 @@ body {
 #trpg-review-flow .r-excluded .content {
   opacity: 0.5;
   text-decoration: line-through;
-}
-#trpg-review-flow .r-check {
-  position: absolute;
-  left: max(6px, calc((100% - 820px) / 2));
-  top: 15px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 20px;
-  height: 22px;
 }
 #trpg-review-flow .r-state {
   font-size: 11px;
@@ -651,10 +647,8 @@ body {
   #trpg-review-flow .r-header summary {
     min-height: 36px;
   }
-  #trpg-review-flow .r-check {
-    width: 25px;
-    height: 36px;
-    top: 7px;
+  #trpg-review-flow #rr-range-mode {
+    display: inline-block;
   }
   #trpg-review-flow .r-toolbar {
     gap: 5px;

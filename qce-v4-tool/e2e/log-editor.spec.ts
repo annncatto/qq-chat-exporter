@@ -1,10 +1,10 @@
-import { test, expect, type Page } from "@playwright/test";
+import { test, expect, type Page, type WebSocketRoute } from "@playwright/test";
 import { readFile } from "node:fs/promises";
 
 test.use({ video: "off" });
 
 const BASE = process.env.E2E_FRONTEND_URL || "http://127.0.0.1:3000";
-const EDITOR = `${BASE}/static/qce/log-editor/index.html`;
+const EDITOR = `${BASE}/static/qce/log-editor/workspace.html`;
 const fixture = {
   chatInfo: { name: "验证团" },
   messages: [
@@ -68,10 +68,19 @@ test("real file review, identity binding, draft recovery, grouping and portable 
   await page.keyboard.press("s");
   await page.keyboard.press("a");
   await expect(page.locator("#rr-progress")).toHaveText("已确认 4 / 4");
-  for (const index of [1, 2, 4])
-    await page
-      .getByRole("checkbox", { name: "选择第 " + index + " 条", exact: true })
-      .check();
+  await page.getByRole("button", { name: "查看第 1 条", exact: true }).click();
+  await page.keyboard.press("e");
+  await page.locator("#rr-draft").fill("你们终于来到门前。");
+  await page.keyboard.press("Control+Enter");
+  await expect(page.locator(".r-current")).toHaveAttribute("data-message", "2");
+  const first = (await page.locator('[data-message="1"] .message-bubble').boundingBox())!;
+  const last = (await page.locator('[data-message="4"] .message-bubble').boundingBox())!;
+  await expect(page.locator("[data-message] input[type=checkbox]")).toHaveCount(0);
+  await page.mouse.move(first.x + 8, first.y + 8);
+  await page.mouse.down();
+  await page.mouse.move(last.x + 8, last.y + 8, { steps: 16 });
+  await page.mouse.up();
+  await expect(page.locator("#rr-selection-count")).toHaveText("已选 4 条");
   await page.locator("#rr-round").fill("第1回合");
   await page.locator("#rr-round").press("Enter");
   await expect(page.locator("#rr-progress")).toHaveText("已确认 4 / 4");
@@ -86,9 +95,11 @@ test("real file review, identity binding, draft recovery, grouping and portable 
   const packed = JSON.parse(await readFile((await downloaded.path())!, "utf8"));
   expect(packed.original).toEqual(fixture);
   expect(packed.state.decisions).toEqual(["keep", "keep", "exclude", "keep"]);
+  expect(packed.state.edits[0]).toBe("你们终于来到门前。");
   expect(packed.state.rounds).toEqual({
     0: "第1回合",
     1: "第1回合",
+    2: "第1回合",
     3: "第1回合",
   });
   await page.locator("#rr-file").setInputFiles({
@@ -225,10 +236,11 @@ test("storage failure preserves the current project until a portable backup is s
   await expect(page.locator("#rr-progress")).toHaveText("已确认 1 / 8");
 });
 
-test("QCE export enters editing directly and keeps its workspace when changing tabs", async ({
+test("QCE workspace imports QQ records and local files in the same project", async ({
   page,
 }) => {
-  let created = false;
+  let exportCompleted = false;
+  let socket: WebSocketRoute | undefined;
   let exports = 0;
   let downloads = 0;
   let sourceReads = 0;
@@ -248,7 +260,7 @@ test("QCE export enters editing directly and keeps its workspace when changing t
     localStorage.setItem("qce_access_token", "mock-editor-token");
     localStorage.setItem("qce-onboarding-completed", "true");
   });
-  await page.routeWebSocket("**", () => {});
+  await page.routeWebSocket("**", (route) => { socket = route; });
   await page.route("https://api.github.com/**", (route) =>
     route.fulfill({ json: [] }),
   );
@@ -295,31 +307,38 @@ test("QCE export enters editing directly and keeps its workspace when changing t
       data = { friends: [], totalCount: 0, hasNext: false };
     else if (url.pathname === "/api/recent-contacts") data = { contacts: [] };
     else if (url.pathname === "/api/tasks")
-      data = { tasks: created ? [task] : [] };
+      data = { tasks: exportCompleted ? [task] : [] };
     else if (url.pathname.endsWith("/export") && method === "POST") {
       exports++;
       const body = route.request().postDataJSON();
       expect(body.format).toBe("JSON");
-      created = true;
-      data = { ...task, taskId: task.id };
+      data = { taskId: task.id, status: "running" };
     }
     return route.fulfill({ json: { success: true, data } });
   });
-  await page.goto(`${BASE}/qce/sessions/`);
-  await page.getByRole("button", { name: "整理", exact: true }).click();
+  await page.goto(`${BASE}/qce/`);
+  await page.getByRole("button", { name: "打开跑团工作台" }).click();
+  const editor = page.frameLocator('iframe[title="跑团 log 整理"]');
+  await expect(editor.getByRole("button", { name: "导入记录", exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "从 QQ 导入" }).click();
   const dialog = page.getByRole("dialog");
   await expect(
     dialog.getByRole("heading", { name: "导出并整理", level: 1 }),
   ).toBeVisible();
+  await dialog.getByText("验证团", { exact: true }).click();
   await dialog.getByRole("button", { name: "开始整理", exact: true }).click();
-  const editor = page.frameLocator('iframe[title="跑团 log 整理"]');
+  await expect(page.getByText("正在准备 QQ 记录…")).toBeVisible();
+  await expect(page).toHaveURL(/\/qce\/log-editor\/$/);
+  await expect.poll(() => Boolean(socket)).toBe(true);
+  exportCompleted = true;
+  socket!.send(JSON.stringify({ type: "export_complete", data: { ...task, taskId: task.id } }));
   await expect(editor.locator("#rr-title")).toHaveText("验证团", {
     timeout: 15000,
   });
   await expect(editor.locator("#rr-progress")).toHaveText("已确认 0 / 4");
   await editor.locator("#rr-keep").click();
   await page.getByRole("button", { name: "会话", exact: true }).click();
-  await page.getByRole("button", { name: "跑团整理", exact: true }).click();
+  await page.getByRole("button", { name: "跑团工作台", exact: true }).click();
   await expect(editor.locator(".r-current")).toHaveAttribute(
     "data-message",
     "2",
@@ -362,6 +381,10 @@ test("QCE export enters editing directly and keeps its workspace when changing t
   await expect(editor.locator("#rr-progress")).toHaveText("已确认 1 / 8");
   expect(sourceReads).toBe(2);
   await page.getByRole("button", { name: "会话", exact: true }).click();
+  await page.getByRole("button", { name: "整理", exact: true }).click();
+  await expect(dialog.getByRole("heading", { name: "导出并整理", level: 1 })).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(dialog).toBeHidden();
   await page.getByRole("button", { name: "导出", exact: true }).click();
   await expect(
     page

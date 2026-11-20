@@ -11,7 +11,6 @@
   const MAX_BYTES = 64 * 1024 * 1024;
   let project = null,
     selected = new Set(),
-    anchor = null,
     history = [],
     historyBytes = 0;
   let status = "",
@@ -210,7 +209,6 @@
   async function activate(next, restored = false) {
     project = C.validateProject(next);
     selected.clear();
-    anchor = null;
     history = [];
     historyBytes = 0;
     backup = null;
@@ -316,7 +314,6 @@
     state().scope = clone(scope);
     pane.scope = clone(scope);
     selected.clear();
-    anchor = null;
     const ids = C.indices(project, scope);
     state().current =
       ids.find((i) => state().decisions[i] === "pending") ?? ids[0] ?? null;
@@ -345,7 +342,6 @@
       () => {
         C.decide(project, i, kind, text);
         selected.clear();
-        anchor = null;
       },
       true,
     );
@@ -359,7 +355,6 @@
         () => {
           C.assign(project, [...selected], label);
           selected.clear();
-          anchor = null;
         },
         false,
       );
@@ -377,7 +372,6 @@
     }
     activePane.scope = clone(state().scope);
     selected.clear();
-    anchor = null;
     status = "已撤销";
     render(true);
     scheduleSave();
@@ -514,28 +508,6 @@
     );
     block.dataset.message = String(index + 1);
     block.setAttribute("role", "listitem");
-    const checkLabel = node("label", "r-check"),
-      check = node("input");
-    check.type = "checkbox";
-    check.checked = selected.has(index);
-    check.disabled = editing();
-    check.setAttribute("aria-label", "选择第 " + (index + 1) + " 条");
-    check.addEventListener("click", (event) => {
-      activePane = pane;
-      state().scope = clone(pane.scope);
-      state().current = index;
-      const a = pane.ids.indexOf(anchor),
-        b = pane.ids.indexOf(index),
-        ids =
-          event.shiftKey && a >= 0
-            ? pane.ids.slice(Math.min(a, b), Math.max(a, b) + 1)
-            : [index];
-      for (const i of ids) check.checked ? selected.add(i) : selected.delete(i);
-      anchor = index;
-      render(false);
-    });
-    checkLabel.append(check);
-    block.append(checkLabel);
     const self = !!(
         (window.selfUin && person.qq === window.selfUin) ||
         (window.selfUid && person.uid === window.selfUid)
@@ -579,7 +551,11 @@
       head.append(node("span", "r-message-source", window.name));
     const number = button(
       "#" + (index + 1),
-      () => {
+      (event) => {
+        if (event.shiftKey && pane.ids.includes(state().current)) {
+          selectionRange(pane, state().current, index);
+          return;
+        }
         activePane = pane;
         jump(index, pane.scope);
       },
@@ -638,13 +614,14 @@
     block.addEventListener("pointerdown", (event) => {
       if (
         !editing() &&
-        ["draft", "section", "round", "unassigned"].includes(pane.scope.type) &&
+        !drag &&
         event.button === 0 &&
-        event.pointerType !== "touch" &&
+        (event.pointerType !== "touch" || root.classList.contains("is-selecting-range")) &&
         !event.target.closest("button,input,textarea,label,details,select")
-      )
+      ) {
         drag = {
           pane,
+          pointerId: event.pointerId,
           start: index,
           x: event.clientX,
           y: event.clientY,
@@ -652,6 +629,8 @@
           lastY: event.clientY,
           started: false,
         };
+        if (event.pointerType === "touch") pane.viewport.setPointerCapture(event.pointerId);
+      }
     });
     return block;
   }
@@ -660,28 +639,37 @@
       b = pane.ids.indexOf(end);
     if (a < 0 || b < 0) return;
     selected = new Set(pane.ids.slice(Math.min(a, b), Math.max(a, b) + 1));
-    renderChecks();
+    renderSelection();
   }
-  function dragTick() {
+  function updateDragSelection(scroll) {
     if (!drag?.started) return;
     const { pane, lastX: x, lastY: y } = drag,
       box = pane.viewport.getBoundingClientRect();
-    if (y < box.top + 25) pane.viewport.scrollTop -= 16;
-    else if (y > box.bottom - 25) pane.viewport.scrollTop += 16;
+    if (scroll && y < box.top + 25) pane.viewport.scrollTop -= 16;
+    else if (scroll && y > box.bottom - 25) pane.viewport.scrollTop += 16;
     const hit = document
       .elementFromPoint(
         Math.max(box.left + 3, Math.min(x, box.right - 3)),
         Math.max(box.top + 3, Math.min(y, box.bottom - 3)),
       )
       ?.closest("[data-index]");
-    if (hit && pane.viewport.contains(hit))
-      selectionRange(pane, drag.start, Number(hit.dataset.index));
+    if (hit && pane.viewport.contains(hit)) {
+      const end = Number(hit.dataset.index);
+      if (end !== drag.end) {
+        drag.end = end;
+        selectionRange(pane, drag.start, end);
+      }
+    }
+  }
+  function dragTick() {
+    if (!drag?.started) return;
+    updateDragSelection(true);
     dragFrame = requestAnimationFrame(dragTick);
   }
   document.addEventListener(
     "pointermove",
     (event) => {
-      if (!drag) return;
+      if (event.pointerId !== drag?.pointerId) return;
       drag.lastX = event.clientX;
       drag.lastY = event.clientY;
       if (
@@ -689,18 +677,22 @@
         Math.hypot(event.clientX - drag.x, event.clientY - drag.y) > 6
       ) {
         drag.started = true;
-        activePane = drag.pane;
-        state().scope = clone(activePane.scope);
         root.classList.add("is-dragging");
         window.getSelection()?.removeAllRanges();
+        selectionRange(drag.pane, drag.start, drag.start);
         dragTick();
       }
       if (drag.started) event.preventDefault();
     },
     { passive: false },
   );
-  document.addEventListener("pointerup", () => {
-    if (drag?.started) {
+  function finishDrag(event) {
+    if (event && event.pointerId !== drag?.pointerId) return;
+    if (drag?.started && event?.type === "pointerup") {
+      drag.lastX = event.clientX;
+      drag.lastY = event.clientY;
+      updateDragSelection(false);
+      if (event.pointerType === "touch") setRangeMode(false);
       skipClick = true;
       setTimeout(() => {
         skipClick = false;
@@ -709,14 +701,18 @@
     drag = null;
     cancelAnimationFrame(dragFrame);
     root.classList.remove("is-dragging");
-  });
-  function renderChecks() {
+  }
+  document.addEventListener("pointerup", finishDrag);
+  document.addEventListener("pointercancel", finishDrag);
+  window.addEventListener("blur", () => finishDrag());
+  function setRangeMode(enabled) {
+    root.classList.toggle("is-selecting-range", enabled);
+    el("range-mode").setAttribute("aria-pressed", String(enabled));
+  }
+  function renderSelection() {
     for (const pane of panes)
-      for (const [id, row] of pane.view.nodes) {
+      for (const [id, row] of pane.view.nodes)
         row.classList.toggle("r-selected", selected.has(id));
-        const input = row.querySelector("input[type=checkbox]");
-        if (input) input.checked = selected.has(id);
-      }
     const ids = activePane?.ids || [];
     el("select-all").checked =
       !!ids.length && ids.every((i) => selected.has(i));
@@ -897,6 +893,8 @@
     el("select-all-label").hidden =
       activePane.scope.type === "all" || !ids.length;
     el("select-all").disabled = editing();
+    el("range-mode").disabled = editing();
+    if (editing()) setRangeMode(false);
     el("prev").disabled =
       editing() || !current() || ids.indexOf(state().current) <= 0;
     el("next").disabled =
@@ -936,7 +934,7 @@
     el("panes").classList.toggle("is-split", panes.length > 1);
     for (const pane of panes) pane.view.setItems(pane.ids, project);
     renderManagers();
-    renderChecks();
+    renderSelection();
     el("draft-view").disabled = editing();
     manuscript.refresh();
     if (reveal && current()) activePane.view.reveal(state().current);
@@ -1187,12 +1185,15 @@
     const enabled = el("select-all").checked;
     for (const id of activePane.ids)
       enabled ? selected.add(id) : selected.delete(id);
-    renderChecks();
+    renderSelection();
+  });
+  el("range-mode").addEventListener("click", () => {
+    setRangeMode(!root.classList.contains("is-selecting-range"));
   });
   el("clear-selection").addEventListener("click", () => {
     selected.clear();
-    anchor = null;
-    renderChecks();
+    setRangeMode(false);
+    renderSelection();
   });
   for (const menu of [
     el("open-menu"),

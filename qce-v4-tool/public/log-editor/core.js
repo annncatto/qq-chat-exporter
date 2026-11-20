@@ -442,12 +442,14 @@
       throw new Error("正文为空，请填写内容或选择排除。");
     if (project.state.useSection && !project.state.defaultRound.trim())
       throw new Error("请填写当前章节 / 回合。");
+    const revisiting = project.state.decisions[index] !== "pending";
     if (text !== undefined) project.state.edits[index] = text;
     project.state.decisions[index] = decision;
     if (project.state.useSection && project.state.defaultRound)
       project.state.rounds[index] = project.state.defaultRound;
     project.state.draft = null;
-    project.state.current = nextPending(project, index);
+    const following = revisiting ? indices(project).find((id) => id > index) : undefined;
+    project.state.current = following ?? nextPending(project, index);
   }
   function assign(project, ids, round) {
     round = round.trim();

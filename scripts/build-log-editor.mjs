@@ -4,7 +4,7 @@ import { fileURLToPath } from "node:url";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "../qce-v4-tool");
 const source = resolve(root, "public/log-editor");
-let html = await readFile(resolve(source, "index.html"), "utf8");
+let html = await readFile(resolve(source, "workspace.html"), "utf8");
 const css = await readFile(resolve(source, "style.css"), "utf8");
 const sharedCss = await readFile(
   resolve(root, "../qq-chat-export-core/assets/modern_css.css"),
