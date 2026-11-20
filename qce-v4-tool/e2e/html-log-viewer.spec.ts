@@ -358,18 +358,23 @@ test('review follows the next row and can exclude a range in one action', async 
     await page.goto(pathToFileURL(index).href);
     await page.getByLabel('分屏布局').selectOption('horizontal');
     const right = page.getByLabel('对照消息');
-    const leftFirst = page.locator('#viewport [data-i="0"]');
     await right.locator('[data-i="0"] .content').click();
-    const leftTop = (await leftFirst.boundingBox())!.y;
+    const readLeftTop = () => document.querySelector('#viewport [data-i="0"]')?.getBoundingClientRect().top ?? 0;
+    const initialTop = await page.waitForFunction(readLeftTop);
+    const leftTop = await initialTop.jsonValue();
+    await initialTop.dispose();
     const cursor = right.locator('.qce-log-current');
     for (let i = 1; i < rows.length; i++) {
       await page.keyboard.press('a');
       await expect(cursor).toHaveAttribute('data-i', String(i));
       await expect(cursor).toBeInViewport();
       if (i === 9) {
-        const bounds = (await right.boundingBox())!;
-        const box = (await cursor.boundingBox())!;
-        expect(Math.abs(box.y + box.height / 2 - (bounds.y + bounds.height / 2))).toBeLessThan(2);
+        await expect.poll(() => right.evaluate(pane => {
+          const box = pane.querySelector('.qce-log-current')?.getBoundingClientRect();
+          if (!box) return Infinity;
+          const bounds = pane.getBoundingClientRect();
+          return Math.abs(box.y + box.height / 2 - (bounds.y + bounds.height / 2));
+        })).toBeLessThan(2);
       }
     }
     await page.keyboard.press('a');
@@ -377,20 +382,25 @@ test('review follows the next row and can exclude a range in one action', async 
     await page.keyboard.press('a');
     await expect(cursor).toHaveAttribute('data-i', String(rows.length - 1));
     await expect(cursor).toBeInViewport();
-    expect((await leftFirst.boundingBox())!.y).toBeCloseTo(leftTop);
+    await expect.poll(() => page.evaluate(readLeftTop)).toBeCloseTo(leftTop);
 
     async function selectFirstThree() {
       await right.focus();
       await page.keyboard.press('Home');
-      const first = right.locator('[data-i="0"] .content');
-      const third = right.locator('[data-i="2"] .content');
-      await expect(first).toBeInViewport();
-      await expect(third).toBeInViewport();
-      const from = (await first.boundingBox())!;
-      const to = (await third.boundingBox())!;
-      await page.mouse.move(from.x + 5, from.y + 5);
+      const positions = await page.waitForFunction(() => {
+        const pane = document.querySelector('[aria-label="对照消息"]');
+        if (!pane || pane.scrollTop !== 0) return null;
+        const bounds = pane.getBoundingClientRect();
+        const first = pane.querySelector('[data-i="0"] .content')?.getBoundingClientRect();
+        const third = pane.querySelector('[data-i="2"] .content')?.getBoundingClientRect();
+        if (!first || !third || first.top < bounds.top || third.bottom > bounds.bottom) return null;
+        return { from: { x: first.x + 5, y: first.y + 5 }, to: { x: third.x + 5, y: third.y + 5 } };
+      });
+      const { from, to } = (await positions.jsonValue())!;
+      await positions.dispose();
+      await page.mouse.move(from.x, from.y);
       await page.mouse.down();
-      await page.mouse.move(to.x + 5, to.y + 5, { steps: 8 });
+      await page.mouse.move(to.x, to.y, { steps: 8 });
       await page.mouse.up();
       await expect(page.getByText('已选 3 条')).toBeVisible();
     }
